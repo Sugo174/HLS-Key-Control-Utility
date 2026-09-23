@@ -9,6 +9,8 @@ description = "Internal utility for HLS key control of electricity meters."
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.9,<7",
+    "pyodbc>=5.3,<6",
+    "python-dotenv>=1.2,<2",
 ]
 
 [tool.setuptools.packages.find]
