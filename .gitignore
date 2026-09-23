@@ -1,0 +1,11 @@
+# Virtual environment and generated Python files
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local secrets and machine-specific settings
+.env
+config.local.*
+
+# IDE files
+.vscode/settings.json
