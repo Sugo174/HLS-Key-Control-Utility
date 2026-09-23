@@ -21,15 +21,20 @@ from PySide6.QtWidgets import (
 from hls_key_control.domain.models import (
     Meter,
     MeterStatus,
-    OperationType,
 )
 
-from hls_key_control.services.hls_registry import HlsRegistry
-from hls_key_control.services.meter_registry import MeterRegistry
-from hls_key_control.services.operation_journal import OperationJournal
+from hls_key_control.infrastructure.hls_key_repository import (
+    SqlHlsKeyRepository,
+)
+from hls_key_control.infrastructure.meter_repository import (
+    SqlMeterRepository,
+)
+from hls_key_control.infrastructure.operation_journal_repository import (
+    SqlOperationJournal,
+)
 
 
-TEST_SERIAL_NUMBER = "971-TEST-001"
+TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
 
 class MainWindow(QMainWindow):
@@ -38,15 +43,16 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.registry = MeterRegistry()
-        self.hls_registry = HlsRegistry()
+        self.registry = SqlMeterRepository()
+        self.hls_registry = SqlHlsKeyRepository()
         self.current_meter: Meter | None = None
-        self.operation_journal = OperationJournal()
+        self.operation_journal = SqlOperationJournal()
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
 
         self._build_interface()
+        self._refresh_operations()
 
     def _build_interface(self) -> None:
         """Собирает элементы главного окна."""
@@ -127,7 +133,7 @@ class MainWindow(QMainWindow):
         buttons_layout.addStretch()
 
         self.system_status_label = QLabel(
-            "Реестр: временно в памяти · Режим: тестовый"
+            "Реестр: SQL Server · Режим: тестовый"
         )
         self.system_status_label.setObjectName("systemStatus")
 
@@ -169,34 +175,36 @@ class MainWindow(QMainWindow):
         container.setLayout(root_layout)
         self.setCentralWidget(container)
 
-    def _record_operation(
-        self,
-        operation_type: OperationType,
-        description: str,
-    ) -> None:
-        """Сохраняет операцию и выводит её в журнал интерфейса."""
+    def _refresh_operations(self) -> None:
+        """Обновляет список последних операций из SQL Server."""
+        self.operations_list.clear()
 
-        if self.current_meter is None:
+        try:
+            operations = self.operation_journal.recent()
+        except Exception:
+            self.operations_list.hide()
+            self.journal_empty_label.setText(
+                "Не удалось загрузить журнал операций."
+            )
+            self.journal_empty_label.show()
             return
 
-        operation = self.operation_journal.record(
-            meter_serial_number=self.current_meter.serial_number,
-            operation_type=operation_type,
-            description=description,
-        )
-
-        operation_time = operation.created_at.astimezone().strftime(
-            "%H:%M:%S"
-        )
-
-        item = QListWidgetItem(
-            f"{operation_time} · {operation.meter_serial_number} · "
-            f"{operation.description}"
-        )
+        if not operations:
+            self.operations_list.hide()
+            self.journal_empty_label.setText("Операций пока нет.")
+            self.journal_empty_label.show()
+            return
 
         self.journal_empty_label.hide()
         self.operations_list.show()
-        self.operations_list.insertItem(0, item)
+
+        for operation in operations:
+            time_text = operation.created_at.strftime("%H:%M:%S")
+            item = QListWidgetItem(
+                f"{time_text} · {operation.meter_serial_number} · "
+                f"{operation.description}"
+            )
+            self.operations_list.addItem(item)
 
     def _read_meter_number(self) -> None:
         """Временно имитирует чтение номера из счётчика."""
@@ -211,16 +219,7 @@ class MainWindow(QMainWindow):
             f"Серийный номер: {meter.serial_number}"
         )
 
-        if was_created:
-            self._record_operation(
-                OperationType.METER_REGISTERED,
-                "ПУ внесён в реестр",
-            )
-        else:
-            self._record_operation(
-                OperationType.METER_FOUND,
-                "ПУ найден в реестре",
-            )
+        self._refresh_operations()
 
         if meter.status in {
             MeterStatus.NEW,
@@ -267,10 +266,7 @@ class MainWindow(QMainWindow):
             self.write_button.setEnabled(False)
             return
 
-        self._record_operation(
-            OperationType.HLS_RESERVED,
-            "Новый HLS сформирован и зарезервирован",
-        )
+        self._refresh_operations()
 
         self.meter_status_label.setText(
             "Новый HLS сформирован и зарезервирован. "
@@ -278,7 +274,7 @@ class MainWindow(QMainWindow):
             "Повторная запись заблокирована."
         )
         self.system_status_label.setText(
-            "Реестр: временно в памяти · HLS: зарезервирован"
+            "Реестр: SQL Server · HLS: зарезервирован"
         )
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(True)
@@ -317,17 +313,14 @@ class MainWindow(QMainWindow):
             self.meter_status_label.setText(str(error))
             return
 
-        self._record_operation(
-            OperationType.HLS_RESET,
-            "HLS сброшен, предыдущий ключ отозван",
-        )
+        self._refresh_operations()
 
         self.meter_status_label.setText(
             "HLS сброшен в тестовом режиме. Предыдущий ключ отозван. "
             "Доступна запись нового HLS."
         )
         self.system_status_label.setText(
-            "Реестр: временно в памяти · HLS: предыдущий ключ отозван"
+            "Реестр: SQL Server · HLS: предыдущий ключ отозван"
         )
         self.write_button.setEnabled(True)
         self.reset_button.setEnabled(False)
