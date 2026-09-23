@@ -4,10 +4,13 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -15,9 +18,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hls_key_control.domain.models import Meter, MeterStatus
+from hls_key_control.domain.models import (
+    Meter,
+    MeterStatus,
+    OperationType,
+)
+
 from hls_key_control.services.hls_registry import HlsRegistry
 from hls_key_control.services.meter_registry import MeterRegistry
+from hls_key_control.services.operation_journal import OperationJournal
 
 
 TEST_SERIAL_NUMBER = "971-TEST-001"
@@ -32,6 +41,7 @@ class MainWindow(QMainWindow):
         self.registry = MeterRegistry()
         self.hls_registry = HlsRegistry()
         self.current_meter: Meter | None = None
+        self.operation_journal = OperationJournal()
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
@@ -124,6 +134,33 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(header_layout)
         root_layout.addWidget(meter_card)
         root_layout.addLayout(buttons_layout)
+
+        journal_card = QFrame()
+        journal_card.setObjectName("card")
+
+        journal_layout = QVBoxLayout(journal_card)
+        journal_layout.setContentsMargins(22, 18, 22, 18)
+        journal_layout.setSpacing(10)
+
+        journal_title = QLabel("Последние операции")
+        journal_title.setObjectName("cardTitle")
+
+        self.journal_empty_label = QLabel("Операций пока нет.")
+        self.journal_empty_label.setObjectName("meterStatus")
+
+        self.operations_list = QListWidget()
+        self.operations_list.setObjectName("operationsList")
+        self.operations_list.setMaximumHeight(150)
+        self.operations_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.operations_list.hide()
+
+        journal_layout.addWidget(journal_title)
+        journal_layout.addWidget(self.journal_empty_label)
+        journal_layout.addWidget(self.operations_list)
+
+        root_layout.addWidget(journal_card)
         root_layout.addStretch()
         root_layout.addWidget(self.system_status_label)
 
@@ -131,6 +168,35 @@ class MainWindow(QMainWindow):
         container.setObjectName("rootContainer")
         container.setLayout(root_layout)
         self.setCentralWidget(container)
+
+    def _record_operation(
+        self,
+        operation_type: OperationType,
+        description: str,
+    ) -> None:
+        """Сохраняет операцию и выводит её в журнал интерфейса."""
+
+        if self.current_meter is None:
+            return
+
+        operation = self.operation_journal.record(
+            meter_serial_number=self.current_meter.serial_number,
+            operation_type=operation_type,
+            description=description,
+        )
+
+        operation_time = operation.created_at.astimezone().strftime(
+            "%H:%M:%S"
+        )
+
+        item = QListWidgetItem(
+            f"{operation_time} · {operation.meter_serial_number} · "
+            f"{operation.description}"
+        )
+
+        self.journal_empty_label.hide()
+        self.operations_list.show()
+        self.operations_list.insertItem(0, item)
 
     def _read_meter_number(self) -> None:
         """Временно имитирует чтение номера из счётчика."""
@@ -144,6 +210,17 @@ class MainWindow(QMainWindow):
         self.serial_label.setText(
             f"Серийный номер: {meter.serial_number}"
         )
+
+        if was_created:
+            self._record_operation(
+                OperationType.METER_REGISTERED,
+                "ПУ внесён в реестр",
+            )
+        else:
+            self._record_operation(
+                OperationType.METER_FOUND,
+                "ПУ найден в реестре",
+            )
 
         if meter.status in {
             MeterStatus.NEW,
@@ -190,6 +267,11 @@ class MainWindow(QMainWindow):
             self.write_button.setEnabled(False)
             return
 
+        self._record_operation(
+            OperationType.HLS_RESERVED,
+            "Новый HLS сформирован и зарезервирован",
+        )
+
         self.meter_status_label.setText(
             "Новый HLS сформирован и зарезервирован. "
             "Запись в ПУ пока не подтверждена. "
@@ -215,7 +297,7 @@ class MainWindow(QMainWindow):
             "создание нового пароля для этого ПУ. Продолжить?"
         )
 
-        cancel_button = dialog.addButton(
+        dialog.addButton(
             "Отмена",
             QMessageBox.ButtonRole.RejectRole,
         )
@@ -234,6 +316,11 @@ class MainWindow(QMainWindow):
         except ValueError as error:
             self.meter_status_label.setText(str(error))
             return
+
+        self._record_operation(
+            OperationType.HLS_RESET,
+            "HLS сброшен, предыдущий ключ отозван",
+        )
 
         self.meter_status_label.setText(
             "HLS сброшен в тестовом режиме. Предыдущий ключ отозван. "
@@ -329,6 +416,18 @@ def apply_application_style(app: QApplication) -> None:
             color: #9AA6B8;
             background-color: #E9EDF3;
             border: 1px solid #E9EDF3;
+        }
+
+        QListWidget#operationsList {
+            background-color: white;
+            border: 1px solid #E2E8F1;
+            border-radius: 8px;
+            padding: 4px;
+        }
+
+        QListWidget#operationsList::item {
+            padding: 7px;
+            border-bottom: 1px solid #EEF2F7;
         }
         """
     )
