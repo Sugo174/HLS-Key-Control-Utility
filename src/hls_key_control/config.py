@@ -1,6 +1,7 @@
 """Загрузка локальных настроек подключения к SQL Server."""
 
 import os
+import base64
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -37,6 +38,15 @@ class DatabaseSettings:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class HlsSecuritySettings:
+    """Локальные секреты для защиты HLS-паролей."""
+
+    encryption_key: str
+    fingerprint_secret: bytes
+
+
+
 def load_database_settings() -> DatabaseSettings:
     """Читает настройки из локального файла .env."""
     load_dotenv()
@@ -70,4 +80,40 @@ def load_database_settings() -> DatabaseSettings:
         trust_server_certificate=(
             values["HLS_DB_TRUST_SERVER_CERTIFICATE"]
         ),
+    )
+
+
+def load_hls_security_settings() -> HlsSecuritySettings:
+    """Читает локальные секреты защиты HLS из файла .env."""
+    load_dotenv()
+
+    encryption_key = os.getenv("HLS_ENCRYPTION_KEY", "").strip()
+    fingerprint_secret_text = os.getenv(
+        "HLS_FINGERPRINT_SECRET",
+        "",
+    ).strip()
+
+    if not encryption_key:
+        raise RuntimeError("Не задан HLS_ENCRYPTION_KEY.")
+
+    if not fingerprint_secret_text:
+        raise RuntimeError("Не задан HLS_FINGERPRINT_SECRET.")
+
+    try:
+        fingerprint_secret = base64.urlsafe_b64decode(
+            fingerprint_secret_text.encode("ascii")
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            "HLS_FINGERPRINT_SECRET содержит некорректное значение."
+        ) from error
+
+    if len(fingerprint_secret) != 32:
+        raise RuntimeError(
+            "HLS_FINGERPRINT_SECRET должен содержать 32 байта."
+        )
+
+    return HlsSecuritySettings(
+        encryption_key=encryption_key,
+        fingerprint_secret=fingerprint_secret,
     )
