@@ -117,3 +117,89 @@ def load_hls_security_settings() -> HlsSecuritySettings:
         encryption_key=encryption_key,
         fingerprint_secret=fingerprint_secret,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class MeterConnectionSettings:
+    """Настройки соединения с оптической головкой."""
+
+    port: str
+    baudrate: int
+    timeout_seconds: float
+
+
+def load_meter_connection_settings() -> MeterConnectionSettings:
+    """Читает локальные настройки COM-порта из файла .env."""
+    load_dotenv()
+
+    port = os.getenv("HLS_METER_PORT", "").strip()
+    baudrate_text = os.getenv("HLS_METER_BAUDRATE", "").strip()
+    timeout_text = os.getenv(
+        "HLS_METER_TIMEOUT_SECONDS",
+        "",
+    ).strip()
+
+    if not port:
+        raise RuntimeError("Не задан HLS_METER_PORT.")
+
+    try:
+        baudrate = int(baudrate_text)
+        timeout_seconds = float(timeout_text)
+    except ValueError as error:
+        raise RuntimeError(
+            "Некорректные настройки скорости или тайм-аута COM-порта."
+        ) from error
+
+    if baudrate <= 0 or timeout_seconds <= 0:
+        raise RuntimeError(
+            "Скорость и тайм-аут COM-порта должны быть больше нуля."
+        )
+
+    return MeterConnectionSettings(
+        port=port,
+        baudrate=baudrate,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MeterConnectionSettings:
+    """Настройки соединения с оптической головкой."""
+
+    port: str
+    baudrate: int
+    timeout_seconds: float
+
+
+def load_meter_connection_settings() -> MeterConnectionSettings:
+    """Читает локальные настройки COM-порта из файла .env."""
+    load_dotenv()
+
+    port = os.getenv("HLS_METER_PORT", "").strip()
+    baudrate_text = os.getenv("HLS_METER_BAUDRATE", "").strip()
+    timeout_text = os.getenv(
+        "HLS_METER_TIMEOUT_SECONDS",
+        "",
+    ).strip()
+
+    if not port:
+        raise RuntimeError("Не задан HLS_METER_PORT.")
+
+    try:
+        baudrate = int(baudrate_text)
+        timeout_seconds = float(timeout_text)
+    except ValueError as error:
+        raise RuntimeError(
+            "Некорректные настройки скорости или тайм-аута COM-порта."
+        ) from error
+
+    if baudrate <= 0 or timeout_seconds <= 0:
+        raise RuntimeError(
+            "Скорость и тайм-аут COM-порта должны быть больше нуля."
+        )
+
+    return MeterConnectionSettings(
+        port=port,
+        baudrate=baudrate,
+        timeout_seconds=timeout_seconds,
+    )
