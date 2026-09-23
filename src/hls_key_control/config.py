@@ -203,3 +203,117 @@ def load_meter_connection_settings() -> MeterConnectionSettings:
         baudrate=baudrate,
         timeout_seconds=timeout_seconds,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DlmsSettings:
+    """Локальные параметры защищённого DLMS-сеанса."""
+
+    client_address: int
+    server_address: int
+    authentication: str
+    security: str
+    invocation_counter_obis: str
+    serial_number_obis: str
+    system_title: bytes
+    authentication_key: bytes
+    block_cipher_key: bytes
+
+
+def load_dlms_settings() -> DlmsSettings:
+    """Читает и проверяет DLMS-настройки из файла .env."""
+    load_dotenv()
+
+    required_names = (
+        "HLS_DLMS_CLIENT_ADDRESS",
+        "HLS_DLMS_SERVER_ADDRESS",
+        "HLS_DLMS_AUTHENTICATION",
+        "HLS_DLMS_SECURITY",
+        "HLS_DLMS_INVOCATION_COUNTER_OBIS",
+        "HLS_DLMS_SERIAL_NUMBER_OBIS",
+        "HLS_DLMS_SYSTEM_TITLE_HEX",
+        "HLS_DLMS_AUTHENTICATION_KEY_HEX",
+        "HLS_DLMS_BLOCK_CIPHER_KEY_HEX",
+    )
+
+    values = {name: os.getenv(name, "").strip() for name in required_names}
+    missing_names = [name for name, value in values.items() if not value]
+
+    if missing_names:
+        raise RuntimeError(
+            "Не заполнены настройки DLMS: "
+            + ", ".join(missing_names)
+            + "."
+        )
+
+    try:
+        client_address = int(values["HLS_DLMS_CLIENT_ADDRESS"])
+        server_address = int(values["HLS_DLMS_SERVER_ADDRESS"])
+    except ValueError as error:
+        raise RuntimeError(
+            "DLMS-адреса должны быть целыми числами."
+        ) from error
+
+    system_title = _decode_dlms_hex(
+        values["HLS_DLMS_SYSTEM_TITLE_HEX"],
+        "HLS_DLMS_SYSTEM_TITLE_HEX",
+    )
+    authentication_key = _decode_dlms_hex(
+        values["HLS_DLMS_AUTHENTICATION_KEY_HEX"],
+        "HLS_DLMS_AUTHENTICATION_KEY_HEX",
+    )
+    block_cipher_key = _decode_dlms_hex(
+        values["HLS_DLMS_BLOCK_CIPHER_KEY_HEX"],
+        "HLS_DLMS_BLOCK_CIPHER_KEY_HEX",
+    )
+
+    if len(system_title) != 8:
+        raise RuntimeError(
+            "HLS_DLMS_SYSTEM_TITLE_HEX должен содержать 8 байт."
+        )
+
+    if len(authentication_key) != 16:
+        raise RuntimeError(
+            "HLS_DLMS_AUTHENTICATION_KEY_HEX должен содержать 16 байт."
+        )
+
+    if len(block_cipher_key) != 16:
+        raise RuntimeError(
+            "HLS_DLMS_BLOCK_CIPHER_KEY_HEX должен содержать 16 байт."
+        )
+
+    if values["HLS_DLMS_AUTHENTICATION"] != "HIGH_GMAC":
+        raise RuntimeError(
+            "Поддерживается только HLS_DLMS_AUTHENTICATION=HIGH_GMAC."
+        )
+
+    if values["HLS_DLMS_SECURITY"] != "NONE":
+        raise RuntimeError(
+            "Для данного ПУ ожидается HLS_DLMS_SECURITY=NONE."
+        )
+
+    return DlmsSettings(
+        client_address=client_address,
+        server_address=server_address,
+        authentication=values["HLS_DLMS_AUTHENTICATION"],
+        security=values["HLS_DLMS_SECURITY"],
+        invocation_counter_obis=values[
+            "HLS_DLMS_INVOCATION_COUNTER_OBIS"
+        ],
+        serial_number_obis=values[
+            "HLS_DLMS_SERIAL_NUMBER_OBIS"
+        ],
+        system_title=system_title,
+        authentication_key=authentication_key,
+        block_cipher_key=block_cipher_key,
+    )
+
+
+def _decode_dlms_hex(value: str, setting_name: str) -> bytes:
+    """Преобразует шестнадцатеричную настройку в байты."""
+    try:
+        return bytes.fromhex(value)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{setting_name} содержит некорректное HEX-значение."
+        ) from error
