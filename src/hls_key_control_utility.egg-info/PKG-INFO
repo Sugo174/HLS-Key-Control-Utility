@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: hls-key-control-utility
-Version: 0.1.0
-Summary: Internal utility for HLS key control of electricity meters.
-Requires-Python: >=3.11
-Requires-Dist: PySide6<7,>=6.9

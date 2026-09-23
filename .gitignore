@@ -9,3 +9,5 @@ config.local.*
 
 # IDE files
 .vscode/settings.json
+
+*.egg-info/
