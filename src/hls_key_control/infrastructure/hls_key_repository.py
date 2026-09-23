@@ -7,6 +7,7 @@ from hls_key_control.domain.models import (
     HlsKeyStatus,
     Meter,
     MeterStatus,
+    OperationType,
 )
 from hls_key_control.infrastructure.sql_server import open_connection
 from hls_key_control.services.hls_generator import generate_hls_password
@@ -90,6 +91,13 @@ class SqlHlsKeyRepository:
                 str(meter_row.meter_id),
             )
 
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_RESERVED,
+                "Новый HLS сформирован и зарезервирован.",
+            )
+
             connection.commit()
 
             key = HlsKey(
@@ -109,6 +117,29 @@ class SqlHlsKeyRepository:
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _record_operation(
+        cursor,
+        meter_id: str,
+        operation_type: OperationType,
+        description: str,
+    ) -> None:
+        """Добавляет аудит в рамках текущей SQL-транзакции."""
+        cursor.execute(
+            """
+            INSERT INTO dbo.Operations (
+                meter_id,
+                operation_type,
+                description
+            )
+            VALUES (?, ?, ?);
+            """,
+            meter_id,
+            operation_type.value,
+            description,
+        )
+
 
     def confirm_reset_for_test(self, meter: Meter) -> None:
         """Тестово отзывает HLS и переводит ПУ в состояние после сброса."""
@@ -161,6 +192,13 @@ class SqlHlsKeyRepository:
                 """,
                 MeterStatus.RESET.value,
                 str(meter_row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_RESET,
+                "HLS сброшен, предыдущий ключ отозван.",
             )
 
             connection.commit()

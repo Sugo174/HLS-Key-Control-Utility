@@ -4,7 +4,11 @@ from uuid import UUID
 
 import pyodbc
 
-from hls_key_control.domain.models import Meter, MeterStatus
+from hls_key_control.domain.models import (
+    Meter,
+    MeterStatus,
+    OperationType,
+)
 from hls_key_control.infrastructure.sql_server import open_connection
 
 
@@ -63,6 +67,12 @@ class SqlMeterRepository:
             ).fetchone()
 
             if row is not None:
+                self._record_operation(
+                    cursor,
+                    str(row.meter_id),
+                    OperationType.METER_FOUND,
+                    "ПУ уже присутствует в базе.",
+                )
                 connection.commit()
                 return self._map_meter(row), False
 
@@ -80,6 +90,13 @@ class SqlMeterRepository:
                 normalized_serial,
             ).fetchone()
 
+            self._record_operation(
+                cursor,
+                str(created_row.meter_id),
+                OperationType.METER_REGISTERED,
+                "ПУ внесён в реестр.",
+            )
+
             connection.commit()
             return self._map_meter(created_row), True
         except pyodbc.Error:
@@ -87,6 +104,28 @@ class SqlMeterRepository:
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _record_operation(
+        cursor: pyodbc.Cursor,
+        meter_id: str,
+        operation_type: OperationType,
+        description: str,
+    ) -> None:
+        """Добавляет аудит в рамках текущей SQL-транзакции."""
+        cursor.execute(
+            """
+            INSERT INTO dbo.Operations (
+                meter_id,
+                operation_type,
+                description
+            )
+            VALUES (?, ?, ?);
+            """,
+            meter_id,
+            operation_type.value,
+            description,
+        )
 
     @staticmethod
     def _normalize_serial(serial_number: str) -> str:
