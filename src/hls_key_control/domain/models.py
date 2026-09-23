@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 
 class MeterStatus(StrEnum):
@@ -26,6 +26,15 @@ class HlsKeyStatus(StrEnum):
     FAILED = "failed"
 
 
+class OperationType(StrEnum):
+    """Типы операций, выполняемых с прибором."""
+
+    METER_REGISTERED = "meter_registered"
+    METER_FOUND = "meter_found"
+    HLS_RESERVED = "hls_reserved"
+    HLS_RESET = "hls_reset"
+
+
 @dataclass(slots=True)
 class Meter:
     """Карточка одного счётчика в реестре."""
@@ -46,6 +55,19 @@ class HlsKey:
     meter_serial_number: str
     status: HlsKeyStatus
     fingerprint: str
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+@dataclass(slots=True)
+class Operation:
+    """Неизменяемая запись журнала действий с ПУ."""
+
+    meter_serial_number: str
+    operation_type: OperationType
+    description: str
+    id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
