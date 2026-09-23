@@ -2,7 +2,7 @@
 
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QComboBox,
 )
 
 from hls_key_control.domain.models import (
@@ -33,6 +34,10 @@ from hls_key_control.infrastructure.operation_journal_repository import (
     SqlOperationJournal,
 )
 
+from hls_key_control.config import load_meter_connection_settings
+from hls_key_control.services.serial_ports import (
+    list_available_serial_ports,
+)
 
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
@@ -51,8 +56,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
 
+        self._settings = QSettings(
+            "HlsKeyControl",
+            "HlsKeyControl",
+        )
+
         self._build_interface()
         self._refresh_operations()
+        self._refresh_meter_ports()
 
     def _build_interface(self) -> None:
         """Собирает элементы главного окна."""
@@ -139,6 +150,42 @@ class MainWindow(QMainWindow):
 
         root_layout.addLayout(header_layout)
         root_layout.addWidget(meter_card)
+        port_card = QFrame()
+        port_card.setObjectName("card")
+
+        port_layout = QVBoxLayout(port_card)
+        port_layout.setContentsMargins(22, 16, 22, 16)
+        port_layout.setSpacing(8)
+
+        port_title = QLabel("Оптическая головка")
+        port_title.setObjectName("cardTitle")
+
+        port_controls = QHBoxLayout()
+        port_controls.setSpacing(10)
+
+        self.meter_port_combo = QComboBox()
+        self.meter_port_combo.setObjectName("meterPortCombo")
+        self.meter_port_combo.currentIndexChanged.connect(
+            self._save_selected_meter_port
+        )
+
+        refresh_ports_button = QPushButton("Обновить порты")
+        refresh_ports_button.setObjectName("secondaryButton")
+        refresh_ports_button.clicked.connect(
+            self._refresh_meter_ports
+        )
+
+        port_controls.addWidget(self.meter_port_combo, stretch=1)
+        port_controls.addWidget(refresh_ports_button)
+
+        self.meter_port_status_label = QLabel()
+        self.meter_port_status_label.setObjectName("meterStatus")
+
+        port_layout.addWidget(port_title)
+        port_layout.addLayout(port_controls)
+        port_layout.addWidget(self.meter_port_status_label)
+
+        root_layout.addWidget(port_card)
         root_layout.addLayout(buttons_layout)
 
         journal_card = QFrame()
@@ -174,6 +221,62 @@ class MainWindow(QMainWindow):
         container.setObjectName("rootContainer")
         container.setLayout(root_layout)
         self.setCentralWidget(container)
+
+    def _refresh_meter_ports(self) -> None:
+        """Обновляет список доступных COM-портов."""
+        selected_port = self.meter_port_combo.currentData()
+
+        if selected_port is None:
+            selected_port = str(
+                self._settings.value("meter_port", "")
+            )
+
+        if not selected_port:
+            try:
+                selected_port = (
+                    load_meter_connection_settings().port
+                )
+            except RuntimeError:
+                selected_port = ""
+
+        ports = list_available_serial_ports()
+
+        self.meter_port_combo.blockSignals(True)
+        self.meter_port_combo.clear()
+
+        for port in ports:
+            self.meter_port_combo.addItem(
+                f"{port.device} — {port.description}",
+                port.device,
+            )
+
+        selected_index = self.meter_port_combo.findData(
+            selected_port
+        )
+
+        if selected_index >= 0:
+            self.meter_port_combo.setCurrentIndex(selected_index)
+            self.meter_port_status_label.setText(
+                f"Выбрана оптическая головка: {selected_port}."
+            )
+        else:
+            self.meter_port_status_label.setText(
+                "Выберите COM-порт оптической головки."
+            )
+
+        self.meter_port_combo.blockSignals(False)
+
+    def _save_selected_meter_port(self) -> None:
+        """Сохраняет выбор COM-порта для следующего запуска."""
+        selected_port = self.meter_port_combo.currentData()
+
+        if selected_port is None:
+            return
+
+        self._settings.setValue("meter_port", selected_port)
+        self.meter_port_status_label.setText(
+            f"Выбрана оптическая головка: {selected_port}."
+        )
 
     def _refresh_operations(self) -> None:
         """Обновляет список последних операций из SQL Server."""
@@ -220,6 +323,7 @@ class MainWindow(QMainWindow):
         )
 
         self._refresh_operations()
+        self._refresh_meter_ports()
 
         if meter.status in {
             MeterStatus.NEW,
