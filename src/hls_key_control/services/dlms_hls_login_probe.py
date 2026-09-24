@@ -24,17 +24,21 @@ from hls_key_control.services.dlms_serial_reader import (
 )
 
 
-def create_hls_password_client() -> GXDLMSSecureClient:
+def create_hls_password_client(
+    password: bytes | None = None,
+) -> GXDLMSSecureClient:
     """Создаёт клиента для обычной HLS-аутентификации по паролю."""
     dlms_settings = load_dlms_settings()
-    password_settings = load_hls_password_settings()
+
+    if password is None:
+        password = load_hls_password_settings().password
 
     client = GXDLMSSecureClient(
         useLogicalNameReferencing=True,
         clientAddress=dlms_settings.client_address,
         serverAddress=dlms_settings.server_address,
         forAuthentication=Authentication.HIGH,
-        password=password_settings.password,
+        password=password,
         interfaceType=InterfaceType.HDLC_WITH_MODE_E,
     )
 
@@ -45,10 +49,11 @@ def create_hls_password_client() -> GXDLMSSecureClient:
 
 def read_serial_number_with_hls_password(
     port: str | None = None,
+    password: bytes | None = None,
 ) -> str:
     """Проверяет HLS-вход и читает серийный номер ПУ."""
     dlms_settings = load_dlms_settings()
-    client = create_hls_password_client()
+    client = create_hls_password_client(password)
     connection = _open_mode_e_connection(port)
 
     try:
