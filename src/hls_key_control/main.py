@@ -172,8 +172,12 @@ class MainWindow(QMainWindow):
         self.read_button.setObjectName("readButton")
         self.read_button.clicked.connect(self._read_meter_number)
 
-        self.write_button = QPushButton("Записать новый HLS")
+        self.write_button = QPushButton("Сформировать новый HLS")
         self.write_button.setObjectName("primaryButton")
+        self.write_button.setToolTip(
+            "Формирует и резервирует HLS в реестре. "
+            "Запись в ПУ пока не выполняется."
+        )
         self.write_button.setEnabled(False)
         self.write_button.clicked.connect(self._reserve_new_hls)
 
@@ -423,12 +427,12 @@ class MainWindow(QMainWindow):
             if was_created:
                 self.meter_status_label.setText(
                     f"ПУ считан за {elapsed_seconds:.1f} с и внесён "
-                    "в реестр. Доступна запись нового HLS."
+                    "в реестр. Доступно формирование нового HLS."
                 )
             else:
                 self.meter_status_label.setText(
                     f"ПУ считан за {elapsed_seconds:.1f} с и уже есть "
-                    "в реестре. Доступна запись нового HLS."
+                    "в реестре. Доступно формирование нового HLS."
                 )
 
             self.system_status_label.setText(
@@ -441,7 +445,7 @@ class MainWindow(QMainWindow):
         if meter.status == MeterStatus.OPERATION_UNCONFIRMED:
             self.meter_status_label.setText(
                 "Новый HLS сформирован, но запись в ПУ не подтверждена. "
-                "Повторная запись заблокирована."
+                "Повторное формирование заблокировано."
             )
             self.write_button.setEnabled(False)
             self.reset_button.setEnabled(True)
@@ -494,7 +498,7 @@ class MainWindow(QMainWindow):
         self.meter_status_label.setText(
             "Новый HLS сформирован и зарезервирован. "
             "Запись в ПУ пока не подтверждена. "
-            "Повторная запись заблокирована."
+            "Повторное формирование заблокировано."
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · HLS: зарезервирован"
@@ -540,7 +544,7 @@ class MainWindow(QMainWindow):
 
         self.meter_status_label.setText(
             "HLS сброшен в тестовом режиме. Предыдущий ключ отозван. "
-            "Доступна запись нового HLS."
+            "Доступно формирование нового HLS."
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · HLS: предыдущий ключ отозван"
