@@ -2,7 +2,13 @@
 
 import sys
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import (
+    QObject,
+    QSettings,
+    QThread,
+    Qt,
+    Signal,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -45,6 +51,28 @@ from hls_key_control.services.dlms_serial_reader import (
 
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
+class MeterReadWorker(QObject):
+    """Выполняет физическое чтение ПУ вне потока интерфейса."""
+
+    succeeded = Signal(str)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, port: str) -> None:
+        super().__init__()
+        self._port = port
+
+    def run(self) -> None:
+        """Считывает серийный номер и передаёт результат окну."""
+        try:
+            serial_number = read_meter_serial_number(self._port)
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            self.succeeded.emit(serial_number)
+        finally:
+            self.finished.emit()
+
 
 class MainWindow(QMainWindow):
     """Главное рабочее окно оператора."""
@@ -56,6 +84,8 @@ class MainWindow(QMainWindow):
         self.hls_registry = SqlHlsKeyRepository()
         self.current_meter: Meter | None = None
         self.operation_journal = SqlOperationJournal()
+        self._read_thread: QThread | None = None
+        self._read_worker: MeterReadWorker | None = None
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
@@ -314,7 +344,7 @@ class MainWindow(QMainWindow):
             self.operations_list.addItem(item)
 
     def _read_meter_number(self) -> None:
-        """Считывает номер ПУ и регистрирует его в SQL Server."""
+        """Запускает чтение номера ПУ в фоновом потоке."""
         selected_port = str(
             self.meter_port_combo.currentData() or ""
         )
@@ -325,36 +355,35 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if self._read_thread is not None:
+            return
+
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
         self.meter_status_label.setText(
             f"Считывание номера ПУ через {selected_port}..."
         )
-        QApplication.processEvents()
 
-        try:
-            serial_number = read_meter_serial_number(selected_port)
-            meter, was_created = self.registry.get_or_create(
-                serial_number
-            )
-        except Exception as error:
-            self.current_meter = None
-            self.serial_label.setText("Серийный номер: —")
-            self.meter_status_label.setText(
-                "Не удалось считать номер подключённого ПУ."
-            )
-            self.system_status_label.setText(
-                "Реестр: SQL Server · Ошибка чтения ПУ"
-            )
-            QMessageBox.warning(
-                self,
-                "Не удалось считать номер ПУ",
-                str(error),
-            )
-            return
-        finally:
-            self.read_button.setEnabled(True)
+        thread = QThread(self)
+        worker = MeterReadWorker(selected_port)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._apply_read_serial_number)
+        worker.failed.connect(self._handle_read_failure)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._finish_meter_read)
+
+        self._read_thread = thread
+        self._read_worker = worker
+        thread.start()
+
+    def _apply_read_serial_number(self, serial_number: str) -> None:
+        """Регистрирует успешно считанный ПУ и обновляет окно."""
+        meter, was_created = self.registry.get_or_create(serial_number)
 
         self.current_meter = meter
         self.serial_label.setText(
@@ -398,6 +427,29 @@ class MainWindow(QMainWindow):
         )
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
+
+    def _handle_read_failure(self, error_text: str) -> None:
+        """Показывает безопасное сообщение об ошибке чтения."""
+        self.current_meter = None
+        self.serial_label.setText("Серийный номер: —")
+        self.meter_status_label.setText(
+            "Не удалось считать номер подключённого ПУ."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Ошибка чтения ПУ"
+        )
+
+        QMessageBox.warning(
+            self,
+            "Не удалось считать номер ПУ",
+            error_text,
+        )
+
+    def _finish_meter_read(self) -> None:
+        """Возвращает интерфейс в рабочее состояние."""
+        self._read_thread = None
+        self._read_worker = None
+        self.read_button.setEnabled(True)
 
     def _reserve_new_hls(self) -> None:
         """Создаёт HLS и переводит ПУ в состояние ожидания подтверждения."""
@@ -550,6 +602,7 @@ def apply_application_style(app: QApplication) -> None:
             border: 1px solid #CCD5E2;
         }
 
+        QPushButton#readButton:disabled,
         QPushButton#primaryButton:disabled,
         QPushButton#secondaryButton:disabled {
             color: #9AA6B8;
