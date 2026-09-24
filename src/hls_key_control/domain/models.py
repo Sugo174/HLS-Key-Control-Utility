@@ -26,6 +26,14 @@ class HlsKeyStatus(StrEnum):
     FAILED = "failed"
 
 
+class ExportBatchStatus(StrEnum):
+    """Состояния экспортной партии."""
+
+    CREATED = "created"
+    COMPLETED = "completed"
+    FAILED = "failed"    
+
+
 class OperationType(StrEnum):
     """Типы операций, выполняемых с прибором."""
 
@@ -36,6 +44,8 @@ class OperationType(StrEnum):
     HLS_ACTIVATED = "hls_activated"
     HLS_WRITE_UNCONFIRMED = "hls_write_unconfirmed"
     HLS_WRITE_REJECTED = "hls_write_rejected"
+    EXPORT_BATCH_CREATED = "export_batch_created"
+    EXPORT_BATCH_COMPLETED = "export_batch_completed"
 
 
 @dataclass(slots=True)
@@ -74,3 +84,29 @@ class Operation:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+
+@dataclass(slots=True)
+class ExportBatch:
+    """Неизменяемый состав одной выгрузки HLS."""
+
+    id: UUID
+    number: str
+    status: ExportBatchStatus
+    created_at: datetime
+    created_by: str
+    row_count: int
+    file_name: str | None = None
+    file_sha256: str | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class ExportBatchItem:
+    """Строка экспортной партии без открытого HLS."""
+
+    batch_id: UUID
+    meter_id: UUID
+    hls_key_id: UUID
+    serial_number: str
+    personalized_at: datetime    

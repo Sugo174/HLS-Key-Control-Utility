@@ -75,19 +75,43 @@ class MeterReadWorker(QObject):
         self._port = port
 
     def run(self) -> None:
-        """Считывает серийный номер и передаёт результат окну."""
+        """Считывает серийный номер с безопасными повторами."""
         started_at = time.monotonic()
+        last_error: Exception | None = None
 
         try:
-            serial_number = read_meter_serial_number(
-                self._port,
-                self.progress.emit,
-            )
+            for attempt in range(1, 4):
+                try:
+                    self.progress.emit(
+                        f"Считывание номера ПУ: попытка {attempt} из 3..."
+                    )
+                    serial_number = read_meter_serial_number(
+                        self._port,
+                        self.progress.emit,
+                    )
+                except Exception as error:
+                    last_error = error
+
+                    if attempt < 3:
+                        self.progress.emit(
+                            "ПУ временно не ответил. "
+                            "Повторяем считывание через 2 секунды..."
+                        )
+                        time.sleep(2.0)
+                        continue
+
+                    raise RuntimeError(
+                        "Не удалось считать номер ПУ за 3 попытки."
+                    ) from error
+
+                elapsed_seconds = time.monotonic() - started_at
+                self.succeeded.emit(
+                    serial_number,
+                    elapsed_seconds,
+                )
+                return
         except Exception as error:
             self.failed.emit(str(error))
-        else:
-            elapsed_seconds = time.monotonic() - started_at
-            self.succeeded.emit(serial_number, elapsed_seconds)
         finally:
             self.finished.emit()
 

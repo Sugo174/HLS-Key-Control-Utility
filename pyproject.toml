@@ -15,6 +15,7 @@ dependencies = [
     "pyserial>=3.5,<4",
     "gurux-dlms>=1.0.203,<1.1",
     "gurux-serial>=1.0.21,<1.1",
+    "XlsxWriter>=3.2,<4",
 ]
 
 [tool.setuptools.packages.find]

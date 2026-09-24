@@ -11,3 +11,5 @@ config.local.*
 .vscode/settings.json
 
 *.egg-info/
+
+exports/

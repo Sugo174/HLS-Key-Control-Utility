@@ -1,7 +1,5 @@
 """Физический сброс ПУ на заводской HLS."""
 
-import time
-
 from hls_key_control.config import (
     load_factory_hls_password_settings,
 )
@@ -11,11 +9,12 @@ from hls_key_control.infrastructure.hls_key_repository import (
 from hls_key_control.infrastructure.meter_repository import (
     SqlMeterRepository,
 )
-from hls_key_control.services.dlms_hls_login_probe import (
-    read_serial_number_with_hls_password,
-)
 from hls_key_control.services.dlms_hls_password_writer import (
+    HlsWriteCommandUncertainError,
     write_hls_password,
+)
+from hls_key_control.services.hls_login_verification import (
+    verify_hls_login_with_retries,
 )
 
 
@@ -26,18 +25,30 @@ def reset_meter_to_factory_hls(
     factory_password = (
         load_factory_hls_password_settings().password
     )
+    command_uncertain = False
 
-    write_hls_password(
-        factory_password.decode("ascii"),
-        port,
-    )
+    try:
+        write_hls_password(
+            factory_password.decode("ascii"),
+            port,
+        )
+    except HlsWriteCommandUncertainError:
+        command_uncertain = True
 
-    time.sleep(1.0)
+    try:
+        serial_number = verify_hls_login_with_retries(
+            password=factory_password,
+            port=port,
+        )
+    except Exception as error:
+        if command_uncertain:
+            raise RuntimeError(
+                "Команда сброса могла быть принята ПУ, но заводской "
+                "HLS не удалось подтвердить. Не повторяйте сброс; "
+                "сначала проверьте вход действующим HLS."
+            ) from error
 
-    serial_number = read_serial_number_with_hls_password(
-        port=port,
-        password=factory_password,
-    )
+        raise
 
     meter = SqlMeterRepository().find_by_serial(
         serial_number,

@@ -6,11 +6,12 @@ from hls_key_control.domain.models import Meter
 from hls_key_control.infrastructure.hls_key_repository import (
     SqlHlsKeyRepository,
 )
-from hls_key_control.services.dlms_hls_login_probe import (
-    read_serial_number_with_hls_password,
-)
 from hls_key_control.services.dlms_hls_password_writer import (
+    HlsWriteCommandUncertainError,
     write_hls_password,
+)
+from hls_key_control.services.hls_login_verification import (
+    verify_hls_login_with_retries,
 )
 
 ProgressReporter = Callable[[str], None]
@@ -32,7 +33,6 @@ def personalize_meter_hls(
 ) -> str:
     """Записывает резервный HLS и подтверждает его новым входом."""
     repository = SqlHlsKeyRepository()
-
     new_password = repository.get_reserved_hls_password(meter)
 
     try:
@@ -41,16 +41,19 @@ def personalize_meter_hls(
             "Запись нового HLS в ПУ...",
         )
         write_hls_password(new_password, port)
-
+    except HlsWriteCommandUncertainError:
         _report_progress(
             progress,
-            "Проверка входа по новому HLS...",
+            "Ответ на запись не получен. Проверяем новый HLS...",
         )
-        verified_serial_number = (
-            read_serial_number_with_hls_password(
-                port=port,
-                password=new_password.encode("ascii"),
-            )
+    except Exception:
+        raise
+
+    try:
+        verified_serial_number = verify_hls_login_with_retries(
+            password=new_password.encode("ascii"),
+            port=port,
+            progress=progress,
         )
 
         if (
