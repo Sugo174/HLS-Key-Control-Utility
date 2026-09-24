@@ -700,7 +700,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.hls_registry.confirm_reset_for_test(self.current_meter)
+            self.hls_registry.confirm_physical_reset(self.current_meter)
         except ValueError as error:
             self.meter_status_label.setText(str(error))
             return

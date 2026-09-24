@@ -341,6 +341,30 @@ def load_hls_password_settings() -> HlsPasswordSettings:
     )
 
 
+def load_factory_hls_password_settings() -> HlsPasswordSettings:
+    """Читает заводской HLS ПУ из локального файла .env."""
+    load_dotenv()
+
+    password_text = os.getenv(
+        "HLS_FACTORY_HLS_PASSWORD",
+        "",
+    ).strip()
+
+    if (
+        len(password_text) != 16
+        or not password_text.isascii()
+        or not password_text.isdigit()
+    ):
+        raise RuntimeError(
+            "HLS_FACTORY_HLS_PASSWORD должен содержать "
+            "ровно 16 цифр."
+        )
+
+    return HlsPasswordSettings(
+        password=password_text.encode("ascii"),
+    )
+
+
 def _decode_dlms_hex(value: str, setting_name: str) -> bytes:
     """Преобразует шестнадцатеричную настройку в байты."""
     try:

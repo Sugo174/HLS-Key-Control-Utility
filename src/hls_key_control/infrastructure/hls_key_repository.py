@@ -449,8 +449,8 @@ class SqlHlsKeyRepository:
         )
 
 
-    def confirm_reset_for_test(self, meter: Meter) -> None:
-        """Тестово отзывает HLS и переводит ПУ в состояние после сброса."""
+    def confirm_physical_reset(self, meter: Meter) -> None:
+        """Фиксирует сброс только после проверки заводского HLS в ПУ."""
         connection = open_connection()
 
         try:
