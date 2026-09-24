@@ -56,6 +56,10 @@ from hls_key_control.services.hls_personalization import (
     personalize_meter_hls,
 )
 
+from hls_key_control.services.hls_factory_reset import (
+    reset_meter_to_factory_hls,
+)
+
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
 class MeterReadWorker(QObject):
@@ -127,6 +131,36 @@ class HlsPersonalizationWorker(QObject):
             self.finished.emit()
 
 
+class HlsFactoryResetWorker(QObject):
+    """Выполняет физический сброс HLS вне потока интерфейса."""
+
+    succeeded = Signal(str, float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, port: str) -> None:
+        super().__init__()
+        self._port = port
+
+    def run(self) -> None:
+        started_at = time.monotonic()
+
+        try:
+            serial_number = reset_meter_to_factory_hls(
+                port=self._port,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(
+                serial_number,
+                elapsed_seconds,
+            )
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """Главное рабочее окно оператора."""
 
@@ -141,6 +175,8 @@ class MainWindow(QMainWindow):
         self._read_worker: MeterReadWorker | None = None
         self._hls_thread: QThread | None = None
         self._hls_worker: HlsPersonalizationWorker | None = None
+        self._reset_thread: QThread | None = None
+        self._reset_worker: HlsFactoryResetWorker | None = None
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
@@ -231,8 +267,13 @@ class MainWindow(QMainWindow):
         self.reset_button = QPushButton("Сбросить HLS")
         self.reset_button.setObjectName("secondaryButton")
         self.reset_button.setEnabled(False)
-        self.reset_button.clicked.connect(self._reset_hls_for_test)
-        self.reset_button.hide()
+        self.reset_button.setToolTip(
+            "Возвращает ПУ к заводскому HLS, проверяет вход "
+            "и отзывает активный HLS в реестре."
+        )
+        self.reset_button.clicked.connect(
+            self._start_factory_hls_reset
+        )
 
         buttons_layout.addWidget(self.read_button)
         buttons_layout.addWidget(self.write_button)
@@ -426,6 +467,7 @@ class MainWindow(QMainWindow):
         if (
             self._read_thread is not None
             or self._hls_thread is not None
+            or self._reset_thread is not None
         ):
             return
 
@@ -499,6 +541,18 @@ class MainWindow(QMainWindow):
                 "Повторное формирование заблокировано."
             )
             self.write_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
+            return
+
+        if meter.status == MeterStatus.PERSONALIZED:
+            self.meter_status_label.setText(
+                "Новый HLS подтверждён. Доступен физический "
+                "сброс до заводского HLS."
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · HLS активен"
+            )
+            self.write_button.setEnabled(False)
             self.reset_button.setEnabled(True)
             return
 
@@ -506,7 +560,7 @@ class MainWindow(QMainWindow):
             "Текущий статус ПУ не позволяет записать новый HLS."
         )
         self.write_button.setEnabled(False)
-        self.reset_button.setEnabled(False)
+        self.reset_button.setEnabled(True)
 
     def _handle_read_failure(self, error_text: str) -> None:
         """Показывает безопасное сообщение об ошибке чтения."""
@@ -537,6 +591,7 @@ class MainWindow(QMainWindow):
             self.current_meter is None
             or self._read_thread is not None
             or self._hls_thread is not None
+            or self._reset_thread is not None
         ):
             return
 
@@ -671,18 +726,38 @@ class MainWindow(QMainWindow):
         self.read_button.setEnabled(True)
         self.meter_port_combo.setEnabled(True)
 
-    def _reset_hls_for_test(self) -> None:
-        """Имитирует подтверждённый сервисный сброс в тестовом режиме."""
+    def _start_factory_hls_reset(self) -> None:
+        """Запрашивает подтверждение и запускает физический сброс."""
+        if (
+            self.current_meter is None
+            or self.current_meter.status
+            != MeterStatus.PERSONALIZED
+            or self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+        ):
+            return
 
-        if self.current_meter is None:
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
+        )
+
+        if not selected_port:
+            self.meter_status_label.setText(
+                "Выберите COM-порт оптической головки."
+            )
             return
 
         dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setWindowTitle("Подтверждение сброса HLS")
         dialog.setText(
-            "Тестовый сброс отзовёт текущий HLS и разрешит "
-            "создание нового пароля для этого ПУ. Продолжить?"
+            "ПУ будет возвращён к заводскому HLS. "
+            "Текущий персональный HLS перестанет работать."
+        )
+        dialog.setInformativeText(
+            "Будет выполнена запись заводского HLS, затем "
+            "проверка входа в ПУ. Не отключайте головку и питание."
         )
 
         dialog.addButton(
@@ -690,7 +765,7 @@ class MainWindow(QMainWindow):
             QMessageBox.ButtonRole.RejectRole,
         )
         confirm_button = dialog.addButton(
-            "Сбросить HLS",
+            "Вернуть заводской HLS",
             QMessageBox.ButtonRole.DestructiveRole,
         )
 
@@ -699,23 +774,87 @@ class MainWindow(QMainWindow):
         if dialog.clickedButton() is not confirm_button:
             return
 
-        try:
-            self.hls_registry.confirm_physical_reset(self.current_meter)
-        except ValueError as error:
-            self.meter_status_label.setText(str(error))
-            return
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(False)
+        self.meter_status_label.setText(
+            "Возврат ПУ к заводскому HLS..."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Выполняется сброс HLS"
+        )
 
+        thread = QThread(self)
+        worker = HlsFactoryResetWorker(selected_port)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(
+            self._apply_factory_reset_success
+        )
+        worker.failed.connect(
+            self._handle_factory_reset_failure
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._finish_factory_reset)
+
+        self._reset_thread = thread
+        self._reset_worker = worker
+        thread.start()
+
+    def _apply_factory_reset_success(
+        self,
+        serial_number: str,
+        elapsed_seconds: float,
+    ) -> None:
+        """Обновляет окно после подтверждённого сброса HLS."""
+        self.serial_label.setText(
+            f"Серийный номер: {serial_number}"
+        )
         self._refresh_operations()
 
         self.meter_status_label.setText(
-            "HLS сброшен в тестовом режиме. Предыдущий ключ отозван. "
-            "Доступно формирование нового HLS."
+            f"Заводской HLS восстановлен и подтверждён за "
+            f"{elapsed_seconds:.1f} с. Доступна новая запись HLS."
         )
         self.system_status_label.setText(
-            "Реестр: SQL Server · HLS: предыдущий ключ отозван"
+            "Реестр: SQL Server · HLS сброшен"
         )
+
         self.write_button.setEnabled(True)
         self.reset_button.setEnabled(False)
+
+    def _handle_factory_reset_failure(
+        self,
+        error_text: str,
+    ) -> None:
+        """Блокирует действия при неподтверждённом сбросе."""
+        self.meter_status_label.setText(
+            "Сброс HLS не подтверждён. Повторные действия "
+            "в текущем окне заблокированы."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Требуется проверка ПУ"
+        )
+
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+
+        QMessageBox.warning(
+            self,
+            "Сброс HLS не подтверждён",
+            error_text,
+        )
+
+    def _finish_factory_reset(self) -> None:
+        """Возвращает интерфейс после физического сброса."""
+        self._reset_thread = None
+        self._reset_worker = None
+        self.read_button.setEnabled(True)
+        self.meter_port_combo.setEnabled(True)
 
 
 def apply_application_style(app: QApplication) -> None:
