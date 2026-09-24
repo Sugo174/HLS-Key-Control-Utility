@@ -1,8 +1,10 @@
 """Чтение серийного номера ПУ через IEC Mode E и DLMS/HDLC."""
 
 import time
-
 import serial
+
+from collections.abc import Callable
+
 from gurux_dlms import GXByteBuffer, GXReplyData
 from gurux_dlms.enums import DataType
 from gurux_dlms.objects import GXDLMSData
@@ -14,6 +16,17 @@ from hls_key_control.config import (
 from hls_key_control.services.dlms_client_factory import (
     create_dlms_client,
 )
+
+ProgressReporter = Callable[[str], None]
+
+
+def _report_progress(
+    progress: ProgressReporter | None,
+    message: str,
+) -> None:
+    """Передаёт безопасный статус операции в интерфейс."""
+    if progress is not None:
+        progress(message)
 
 
 def _read_hdlc_frame(connection: serial.Serial) -> bytes:
@@ -148,17 +161,26 @@ def _as_serial_number(value: object) -> str:
 
 def read_meter_serial_number(
     port: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> str:
     """Устанавливает HLS/GMAC-сеанс и читает серийный номер ПУ."""
     from hls_key_control.services.dlms_invocation_counter_reader import (
         read_invocation_counter,
     )
-
     dlms_settings = load_dlms_settings()
-    client = create_dlms_client()
-    client.ciphering.invocationCounter = (
-        read_invocation_counter(port) + 1
+
+    _report_progress(
+        progress,
+        "Получение счётчика вызовов ПУ...",
     )
+    invocation_counter = read_invocation_counter(port)
+
+    _report_progress(
+        progress,
+        "Открытие защищённого HLS-сеанса...",
+    )
+    client = create_dlms_client()
+    client.ciphering.invocationCounter = invocation_counter + 1
     connection = _open_mode_e_connection(port)
 
     try:
@@ -176,6 +198,11 @@ def read_meter_serial_number(
             _read_packet(connection, client, request, reply)
 
         client.parseApplicationAssociationResponse(reply.data)
+
+        _report_progress(
+            progress,
+            "Считывание серийного номера ПУ...",
+        )
 
         serial_object = GXDLMSData(dlms_settings.serial_number_obis)
         request = client.read(serial_object, 2)[0]

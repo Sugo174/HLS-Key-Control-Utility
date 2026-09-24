@@ -18,10 +18,8 @@ from hls_key_control.services.dlms_serial_reader import (
 )
 
 
-def read_invocation_counter(
-    port: str | None = None,
-) -> int:
-    """Читает счётчик вызовов через публичное DLMS-соединение."""
+def read_invocation_counter_from_connection(connection) -> int:
+    """Читает counter через уже открытый оптический канал."""
     settings = load_dlms_settings()
 
     client = GXDLMSSecureClient(
@@ -33,8 +31,6 @@ def read_invocation_counter(
         interfaceType=InterfaceType.HDLC_WITH_MODE_E,
     )
     client.ciphering.security = Security.NONE
-
-    connection = _open_mode_e_connection(port)
 
     try:
         reply = GXReplyData()
@@ -58,14 +54,23 @@ def read_invocation_counter(
         value = client.updateValue(counter_object, 2, reply.value)
         return int(value)
     finally:
-        try:
-            disconnect = client.disconnectRequest()
+        disconnect = client.disconnectRequest()
 
-            if disconnect:
-                connection.write(bytes(disconnect))
-                connection.flush()
-        finally:
-            connection.close()
+        if disconnect:
+            connection.write(bytes(disconnect))
+            connection.flush()
+
+
+def read_invocation_counter(
+    port: str | None = None,
+) -> int:
+    """Читает counter, самостоятельно открывая оптический канал."""
+    connection = _open_mode_e_connection(port)
+
+    try:
+        return read_invocation_counter_from_connection(connection)
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

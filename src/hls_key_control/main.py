@@ -1,6 +1,9 @@
 """Главное окно HLS Key Control Utility."""
 
 import sys
+import time
+
+from datetime import UTC
 
 from PySide6.QtCore import (
     QObject,
@@ -54,7 +57,8 @@ TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 class MeterReadWorker(QObject):
     """Выполняет физическое чтение ПУ вне потока интерфейса."""
 
-    succeeded = Signal(str)
+    progress = Signal(str)
+    succeeded = Signal(str, float)
     failed = Signal(str)
     finished = Signal()
 
@@ -64,12 +68,18 @@ class MeterReadWorker(QObject):
 
     def run(self) -> None:
         """Считывает серийный номер и передаёт результат окну."""
+        started_at = time.monotonic()
+
         try:
-            serial_number = read_meter_serial_number(self._port)
+            serial_number = read_meter_serial_number(
+                self._port,
+                self.progress.emit,
+            )
         except Exception as error:
             self.failed.emit(str(error))
         else:
-            self.succeeded.emit(serial_number)
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(serial_number, elapsed_seconds)
         finally:
             self.finished.emit()
 
@@ -336,7 +346,13 @@ class MainWindow(QMainWindow):
         self.operations_list.show()
 
         for operation in operations:
-            time_text = operation.created_at.strftime("%H:%M:%S")
+            created_at = operation.created_at
+
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+
+            time_text = created_at.astimezone().strftime("%H:%M:%S")
+
             item = QListWidgetItem(
                 f"{time_text} · {operation.meter_serial_number} · "
                 f"{operation.description}"
@@ -368,6 +384,7 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = MeterReadWorker(selected_port)
         worker.moveToThread(thread)
+        worker.progress.connect(self._show_read_progress)
 
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._apply_read_serial_number)
@@ -381,7 +398,15 @@ class MainWindow(QMainWindow):
         self._read_worker = worker
         thread.start()
 
-    def _apply_read_serial_number(self, serial_number: str) -> None:
+    def _show_read_progress(self, message: str) -> None:
+        """Показывает текущий безопасный этап чтения."""
+        self.meter_status_label.setText(message)
+
+    def _apply_read_serial_number(
+        self,
+        serial_number: str,
+        elapsed_seconds: float,
+    ) -> None:
         """Регистрирует успешно считанный ПУ и обновляет окно."""
         meter, was_created = self.registry.get_or_create(serial_number)
 
@@ -397,13 +422,13 @@ class MainWindow(QMainWindow):
         }:
             if was_created:
                 self.meter_status_label.setText(
-                    "ПУ считан и внесён в реестр. "
-                    "Доступна запись нового HLS."
+                    f"ПУ считан за {elapsed_seconds:.1f} с и внесён "
+                    "в реестр. Доступна запись нового HLS."
                 )
             else:
                 self.meter_status_label.setText(
-                    "ПУ считан и уже есть в реестре. "
-                    "Доступна запись нового HLS."
+                    f"ПУ считан за {elapsed_seconds:.1f} с и уже есть "
+                    "в реестре. Доступна запись нового HLS."
                 )
 
             self.system_status_label.setText(
