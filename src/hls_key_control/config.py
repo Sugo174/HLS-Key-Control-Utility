@@ -287,16 +287,22 @@ def load_dlms_settings() -> DlmsSettings:
             "Поддерживается только HLS_DLMS_AUTHENTICATION=HIGH_GMAC."
         )
 
-    if values["HLS_DLMS_SECURITY"] != "NONE":
+    security = values["HLS_DLMS_SECURITY"].upper()
+
+    if security not in {
+        "NONE",
+        "AUTHENTICATION",
+        "AUTHENTICATION_ENCRYPTION",
+    }:
         raise RuntimeError(
-            "Для данного ПУ ожидается HLS_DLMS_SECURITY=NONE."
+            "HLS_DLMS_SECURITY содержит неподдерживаемый режим."
         )
 
     return DlmsSettings(
         client_address=client_address,
         server_address=server_address,
         authentication=values["HLS_DLMS_AUTHENTICATION"],
-        security=values["HLS_DLMS_SECURITY"],
+        security=security,
         invocation_counter_obis=values[
             "HLS_DLMS_INVOCATION_COUNTER_OBIS"
         ],
