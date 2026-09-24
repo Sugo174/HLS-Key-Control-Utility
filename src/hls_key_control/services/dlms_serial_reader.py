@@ -176,7 +176,7 @@ def read_meter_serial_number(
     invocation_counter = read_invocation_counter(port)
 
     time.sleep(1.0)
-    
+
     _report_progress(
         progress,
         "Открытие защищённого HLS-сеанса...",
