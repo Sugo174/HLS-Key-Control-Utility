@@ -18,7 +18,9 @@ from hls_key_control.services.dlms_serial_reader import (
 )
 
 
-def read_invocation_counter() -> int:
+def read_invocation_counter(
+    port: str | None = None,
+) -> int:
     """Читает счётчик вызовов через публичное DLMS-соединение."""
     settings = load_dlms_settings()
 
@@ -32,7 +34,7 @@ def read_invocation_counter() -> int:
     )
     client.ciphering.security = Security.NONE
 
-    connection = _open_mode_e_connection()
+    connection = _open_mode_e_connection(port)
 
     try:
         reply = GXReplyData()

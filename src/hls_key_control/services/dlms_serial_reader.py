@@ -86,12 +86,14 @@ def _read_data_block(
         _read_packet(connection, client, continuation, reply)
 
 
-def _open_mode_e_connection() -> serial.Serial:
+def _open_mode_e_connection(
+    port: str | None = None,
+) -> serial.Serial:
     """Открывает COM-порт и переводит ПУ в HDLC-режим."""
     settings = load_meter_connection_settings()
 
     connection = serial.Serial(
-        port=settings.port,
+        port=port or settings.port,
         baudrate=300,
         bytesize=serial.SEVENBITS,
         parity=serial.PARITY_EVEN,
@@ -144,7 +146,9 @@ def _as_serial_number(value: object) -> str:
     return str(value).strip()
 
 
-def read_meter_serial_number() -> str:
+def read_meter_serial_number(
+    port: str | None = None,
+) -> str:
     """Устанавливает HLS/GMAC-сеанс и читает серийный номер ПУ."""
     from hls_key_control.services.dlms_invocation_counter_reader import (
         read_invocation_counter,
@@ -152,8 +156,10 @@ def read_meter_serial_number() -> str:
 
     dlms_settings = load_dlms_settings()
     client = create_dlms_client()
-    client.ciphering.invocationCounter = read_invocation_counter() + 1
-    connection = _open_mode_e_connection()
+    client.ciphering.invocationCounter = (
+        read_invocation_counter(port) + 1
+    )
+    connection = _open_mode_e_connection(port)
 
     try:
         reply = GXReplyData()

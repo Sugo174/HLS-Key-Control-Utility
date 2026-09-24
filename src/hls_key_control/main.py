@@ -39,6 +39,10 @@ from hls_key_control.services.serial_ports import (
     list_available_serial_ports,
 )
 
+from hls_key_control.services.dlms_serial_reader import (
+    read_meter_serial_number,
+)
+
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
 
@@ -124,9 +128,9 @@ class MainWindow(QMainWindow):
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(12)
 
-        read_button = QPushButton("Считать номер")
-        read_button.setObjectName("readButton")
-        read_button.clicked.connect(self._read_meter_number)
+        self.read_button = QPushButton("Считать номер")
+        self.read_button.setObjectName("readButton")
+        self.read_button.clicked.connect(self._read_meter_number)
 
         self.write_button = QPushButton("Записать новый HLS")
         self.write_button.setObjectName("primaryButton")
@@ -138,7 +142,7 @@ class MainWindow(QMainWindow):
         self.reset_button.setEnabled(False)
         self.reset_button.clicked.connect(self._reset_hls_for_test)
 
-        buttons_layout.addWidget(read_button)
+        buttons_layout.addWidget(self.read_button)
         buttons_layout.addWidget(self.write_button)
         buttons_layout.addWidget(self.reset_button)
         buttons_layout.addStretch()
@@ -310,20 +314,53 @@ class MainWindow(QMainWindow):
             self.operations_list.addItem(item)
 
     def _read_meter_number(self) -> None:
-        """Временно имитирует чтение номера из счётчика."""
-
-        meter, was_created = self.registry.get_or_create(
-            TEST_SERIAL_NUMBER
+        """Считывает номер ПУ и регистрирует его в SQL Server."""
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
         )
 
-        self.current_meter = meter
+        if not selected_port:
+            self.meter_status_label.setText(
+                "Выберите COM-порт оптической головки."
+            )
+            return
 
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.meter_status_label.setText(
+            f"Считывание номера ПУ через {selected_port}..."
+        )
+        QApplication.processEvents()
+
+        try:
+            serial_number = read_meter_serial_number(selected_port)
+            meter, was_created = self.registry.get_or_create(
+                serial_number
+            )
+        except Exception as error:
+            self.current_meter = None
+            self.serial_label.setText("Серийный номер: —")
+            self.meter_status_label.setText(
+                "Не удалось считать номер подключённого ПУ."
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Ошибка чтения ПУ"
+            )
+            QMessageBox.warning(
+                self,
+                "Не удалось считать номер ПУ",
+                str(error),
+            )
+            return
+        finally:
+            self.read_button.setEnabled(True)
+
+        self.current_meter = meter
         self.serial_label.setText(
             f"Серийный номер: {meter.serial_number}"
         )
-
         self._refresh_operations()
-        self._refresh_meter_ports()
 
         if meter.status in {
             MeterStatus.NEW,
@@ -331,13 +368,18 @@ class MainWindow(QMainWindow):
         }:
             if was_created:
                 self.meter_status_label.setText(
-                    "ПУ внесён в реестр. Доступна запись нового HLS."
+                    "ПУ считан и внесён в реестр. "
+                    "Доступна запись нового HLS."
                 )
             else:
                 self.meter_status_label.setText(
-                    "ПУ уже в реестре. Доступна запись нового HLS."
+                    "ПУ считан и уже есть в реестре. "
+                    "Доступна запись нового HLS."
                 )
 
+            self.system_status_label.setText(
+                "Реестр: SQL Server · ПУ считан"
+            )
             self.write_button.setEnabled(True)
             self.reset_button.setEnabled(False)
             return
