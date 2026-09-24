@@ -165,6 +165,44 @@ class SqlHlsKeyRepository:
         finally:
             connection.close()
 
+    def get_unconfirmed_hls_password(self, meter: Meter) -> str:
+        """Возвращает HLS для безопасной проверки неподтверждённой записи."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    m.status AS meter_status,
+                    h.status AS hls_status,
+                    h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE m.serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or str(row.meter_status)
+                != MeterStatus.HLS_STATE_UNKNOWN.value
+                or str(row.hls_status)
+                != HlsKeyStatus.UNCONFIRMED.value
+                or row.encrypted_value is None
+            ):
+                raise ValueError(
+                    "Для ПУ нет неподтверждённого HLS."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
     def confirm_hls_written(self, meter: Meter) -> None:
         """Подтверждает HLS только после успешной проверки входа в ПУ."""
         connection = open_connection()
@@ -186,12 +224,21 @@ class SqlHlsKeyRepository:
             if (
                 row is None
                 or row.current_hls_key_id is None
-                or str(row.status)
-                != MeterStatus.OPERATION_UNCONFIRMED.value
+                or str(row.status) not in {
+                    MeterStatus.OPERATION_UNCONFIRMED.value,
+                    MeterStatus.HLS_STATE_UNKNOWN.value,
+                }
             ):
                 raise ValueError(
                     "Нет HLS, ожидающего подтверждения записи."
                 )
+
+            expected_hls_status = (
+                HlsKeyStatus.RESERVED.value
+                if str(row.status)
+                == MeterStatus.OPERATION_UNCONFIRMED.value
+                else HlsKeyStatus.UNCONFIRMED.value
+            )
 
             changed_keys = cursor.execute(
                 """
@@ -203,7 +250,7 @@ class SqlHlsKeyRepository:
                 """,
                 HlsKeyStatus.ACTIVE.value,
                 str(row.current_hls_key_id),
-                HlsKeyStatus.RESERVED.value,
+                expected_hls_status,
             ).rowcount
 
             if changed_keys != 1:
@@ -302,6 +349,82 @@ class SqlHlsKeyRepository:
             raise
         finally:
             connection.close()
+
+
+    def confirm_hls_write_rejected(self, meter: Meter) -> None:
+        """Фиксирует подтверждённый отказ ПУ без повторной записи."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or row.current_hls_key_id is None
+                or str(row.status)
+                != MeterStatus.HLS_STATE_UNKNOWN.value
+            ):
+                raise ValueError(
+                    "Нет неподтверждённой записи HLS для восстановления."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.FAILED.value,
+                str(row.current_hls_key_id),
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось зафиксировать отказ записи HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET
+                    current_hls_key_id = NULL,
+                    status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.RESET.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_WRITE_REJECTED,
+                "ПУ отклонил запись HLS. Прежний HLS подтверждён.",
+            )
+
+            connection.commit()
+            meter.current_hls_key_id = None
+            meter.status = MeterStatus.RESET
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
 
     @staticmethod
     def _record_operation(

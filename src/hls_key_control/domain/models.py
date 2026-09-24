@@ -35,6 +35,7 @@ class OperationType(StrEnum):
     HLS_RESET = "hls_reset"
     HLS_ACTIVATED = "hls_activated"
     HLS_WRITE_UNCONFIRMED = "hls_write_unconfirmed"
+    HLS_WRITE_REJECTED = "hls_write_rejected"
 
 
 @dataclass(slots=True)

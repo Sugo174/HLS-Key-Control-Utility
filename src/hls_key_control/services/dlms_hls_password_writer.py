@@ -72,7 +72,10 @@ def write_hls_password(
 
         client.parseApplicationAssociationResponse(reply.data)
 
+        time.sleep(1.0)
+
         association = GXDLMSAssociationLogicalName()
+        association.logicalName = "0.0.40.0.3.255"
 
         request = client.method(
             association,

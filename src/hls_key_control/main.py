@@ -52,6 +52,10 @@ from hls_key_control.services.dlms_serial_reader import (
     read_meter_serial_number,
 )
 
+from hls_key_control.services.hls_personalization import (
+    personalize_meter_hls,
+)
+
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
 class MeterReadWorker(QObject):
@@ -84,6 +88,45 @@ class MeterReadWorker(QObject):
             self.finished.emit()
 
 
+class HlsPersonalizationWorker(QObject):
+    """Выполняет запись и проверку HLS вне потока интерфейса."""
+
+    progress = Signal(str)
+    succeeded = Signal(str, float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        meter: Meter,
+        port: str,
+    ) -> None:
+        super().__init__()
+        self._meter = meter
+        self._port = port
+
+    def run(self) -> None:
+        """Записывает HLS и подтверждает его входом в ПУ."""
+        started_at = time.monotonic()
+
+        try:
+            serial_number = personalize_meter_hls(
+                meter=self._meter,
+                port=self._port,
+                progress=self.progress.emit,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(
+                serial_number,
+                elapsed_seconds,
+            )
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """Главное рабочее окно оператора."""
 
@@ -96,6 +139,8 @@ class MainWindow(QMainWindow):
         self.operation_journal = SqlOperationJournal()
         self._read_thread: QThread | None = None
         self._read_worker: MeterReadWorker | None = None
+        self._hls_thread: QThread | None = None
+        self._hls_worker: HlsPersonalizationWorker | None = None
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
@@ -132,7 +177,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(title)
         title_layout.addWidget(subtitle)
 
-        connection_status = QLabel("● Тестовый режим")
+        connection_status = QLabel("● Режим персонализации")
         connection_status.setObjectName("connectionStatus")
 
         header_layout.addLayout(title_layout)
@@ -172,19 +217,22 @@ class MainWindow(QMainWindow):
         self.read_button.setObjectName("readButton")
         self.read_button.clicked.connect(self._read_meter_number)
 
-        self.write_button = QPushButton("Сформировать новый HLS")
+        self.write_button = QPushButton("Записать новый HLS")
         self.write_button.setObjectName("primaryButton")
         self.write_button.setToolTip(
-            "Формирует и резервирует HLS в реестре. "
-            "Запись в ПУ пока не выполняется."
+            "Создаёт новый HLS, записывает его в ПУ и проверяет "
+            "вход с новым паролем."
         )
         self.write_button.setEnabled(False)
-        self.write_button.clicked.connect(self._reserve_new_hls)
+        self.write_button.clicked.connect(
+            self._start_hls_personalization
+        )
 
         self.reset_button = QPushButton("Сбросить HLS")
         self.reset_button.setObjectName("secondaryButton")
         self.reset_button.setEnabled(False)
         self.reset_button.clicked.connect(self._reset_hls_for_test)
+        self.reset_button.hide()
 
         buttons_layout.addWidget(self.read_button)
         buttons_layout.addWidget(self.write_button)
@@ -192,7 +240,7 @@ class MainWindow(QMainWindow):
         buttons_layout.addStretch()
 
         self.system_status_label = QLabel(
-            "Реестр: SQL Server · Режим: тестовый"
+            "Реестр: SQL Server · Готово к персонализации"
         )
         self.system_status_label.setObjectName("systemStatus")
 
@@ -375,7 +423,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if self._read_thread is not None:
+        if (
+            self._read_thread is not None
+            or self._hls_thread is not None
+        ):
             return
 
         self.read_button.setEnabled(False)
@@ -480,10 +531,49 @@ class MainWindow(QMainWindow):
         self._read_worker = None
         self.read_button.setEnabled(True)
 
-    def _reserve_new_hls(self) -> None:
-        """Создаёт HLS и переводит ПУ в состояние ожидания подтверждения."""
+    def _start_hls_personalization(self) -> None:
+        """Запрашивает подтверждение и запускает запись HLS."""
+        if (
+            self.current_meter is None
+            or self._read_thread is not None
+            or self._hls_thread is not None
+        ):
+            return
 
-        if self.current_meter is None:
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
+        )
+
+        if not selected_port:
+            self.meter_status_label.setText(
+                "Выберите COM-порт оптической головки."
+            )
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Подтверждение записи HLS")
+        dialog.setText(
+            "Будет создан и записан новый HLS-пароль в ПУ. "
+            "Прежний HLS перестанет работать."
+        )
+        dialog.setInformativeText(
+            "Не отключайте оптическую головку и питание ПУ "
+            "до завершения проверки нового HLS."
+        )
+
+        dialog.addButton(
+            "Отмена",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        confirm_button = dialog.addButton(
+            "Записать новый HLS",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+
+        dialog.exec()
+
+        if dialog.clickedButton() is not confirm_button:
             return
 
         try:
@@ -495,16 +585,91 @@ class MainWindow(QMainWindow):
 
         self._refresh_operations()
 
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(False)
         self.meter_status_label.setText(
-            "Новый HLS сформирован и зарезервирован. "
-            "Запись в ПУ пока не подтверждена. "
-            "Повторное формирование заблокировано."
+            "Подготовка записи нового HLS..."
         )
         self.system_status_label.setText(
-            "Реестр: SQL Server · HLS: зарезервирован"
+            "Реестр: SQL Server · Выполняется запись HLS"
         )
+
+        thread = QThread(self)
+        worker = HlsPersonalizationWorker(
+            self.current_meter,
+            selected_port,
+        )
+        worker.moveToThread(thread)
+        worker.progress.connect(self._show_hls_progress)
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._apply_hls_success)
+        worker.failed.connect(self._handle_hls_failure)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._finish_hls_personalization
+        )
+
+        self._hls_thread = thread
+        self._hls_worker = worker
+        thread.start()
+
+    def _show_hls_progress(self, message: str) -> None:
+        """Показывает безопасный этап записи HLS."""
+        self.meter_status_label.setText(message)
+
+    def _apply_hls_success(
+        self,
+        serial_number: str,
+        elapsed_seconds: float,
+    ) -> None:
+        """Обновляет окно после подтверждённой записи HLS."""
+        self.serial_label.setText(
+            f"Серийный номер: {serial_number}"
+        )
+        self._refresh_operations()
+
+        self.meter_status_label.setText(
+            f"Новый HLS записан и подтверждён за "
+            f"{elapsed_seconds:.1f} с."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · HLS активен"
+        )
+
         self.write_button.setEnabled(False)
-        self.reset_button.setEnabled(True)
+        self.reset_button.setEnabled(False)
+
+    def _handle_hls_failure(self, error_text: str) -> None:
+        """Блокирует повторную запись после неподтверждённого сбоя."""
+        self._refresh_operations()
+
+        self.meter_status_label.setText(
+            "Запись HLS не подтверждена. "
+            "Повторная запись заблокирована."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Состояние HLS неизвестно"
+        )
+
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+
+        QMessageBox.warning(
+            self,
+            "Запись HLS не подтверждена",
+            error_text,
+        )
+
+    def _finish_hls_personalization(self) -> None:
+        """Возвращает интерфейс после фоновой записи HLS."""
+        self._hls_thread = None
+        self._hls_worker = None
+        self.read_button.setEnabled(True)
+        self.meter_port_combo.setEnabled(True)
 
     def _reset_hls_for_test(self) -> None:
         """Имитирует подтверждённый сервисный сброс в тестовом режиме."""
