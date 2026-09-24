@@ -315,6 +315,32 @@ def load_dlms_settings() -> DlmsSettings:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class HlsPasswordSettings:
+    """Текущий HLS-пароль ПУ для проверки HLS-сеанса."""
+
+    password: bytes
+
+
+def load_hls_password_settings() -> HlsPasswordSettings:
+    """Читает текущий HLS-пароль ПУ из локального файла .env."""
+    load_dotenv()
+
+    password_text = os.getenv(
+        "HLS_METER_HLS_PASSWORD",
+        "",
+    ).strip()
+
+    if len(password_text) != 16 or not password_text.isascii():
+        raise RuntimeError(
+            "HLS_METER_HLS_PASSWORD должен содержать ровно 16 ASCII-символов."
+        )
+
+    return HlsPasswordSettings(
+        password=password_text.encode("ascii"),
+    )
+
+
 def _decode_dlms_hex(value: str, setting_name: str) -> bytes:
     """Преобразует шестнадцатеричную настройку в байты."""
     try:
