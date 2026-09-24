@@ -31,7 +31,7 @@ def verify_hls_login_with_retries(
                 progress,
                 f"Повторная проверка HLS: попытка {attempt} из 3...",
             )
-            time.sleep(2.0)
+            time.sleep(5.0)
 
         try:
             return read_serial_number_with_hls_password(

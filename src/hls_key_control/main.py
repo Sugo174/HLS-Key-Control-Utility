@@ -9,9 +9,11 @@ from PySide6.QtCore import (
     QObject,
     QSettings,
     QThread,
+    QTimer,
     Qt,
     Signal,
 )
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -83,7 +85,7 @@ class MeterReadWorker(QObject):
             for attempt in range(1, 4):
                 try:
                     self.progress.emit(
-                        f"Считывание номера ПУ: попытка {attempt} из 3..."
+                        f"Считывание номера счётчика: попытка {attempt} из 3..."
                     )
                     serial_number = read_meter_serial_number(
                         self._port,
@@ -94,14 +96,14 @@ class MeterReadWorker(QObject):
 
                     if attempt < 3:
                         self.progress.emit(
-                            "ПУ временно не ответил. "
-                            "Повторяем считывание через 2 секунды..."
+                            "Счётчик временно не ответил. "
+                            "Повторяем считывание через 5 секунд..."
                         )
-                        time.sleep(2.0)
+                        time.sleep(5.0)
                         continue
 
                     raise RuntimeError(
-                        "Не удалось считать номер ПУ за 3 попытки."
+                        "Не удалось считать номер счётчика за 3 попытки."
                     ) from error
 
                 elapsed_seconds = time.monotonic() - started_at
@@ -201,6 +203,16 @@ class MainWindow(QMainWindow):
         self._hls_worker: HlsPersonalizationWorker | None = None
         self._reset_thread: QThread | None = None
         self._reset_worker: HlsFactoryResetWorker | None = None
+        self._operation_started_at: float | None = None
+        self._operation_title = ""
+        self._operation_indicator_on = True
+        self._operation_cursor_active = False
+
+        self._operation_timer = QTimer(self)
+        self._operation_timer.setInterval(500)
+        self._operation_timer.timeout.connect(
+            self._update_operation_indicator
+        )
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setMinimumSize(860, 560)
@@ -254,7 +266,7 @@ class MainWindow(QMainWindow):
         meter_layout.setContentsMargins(22, 20, 22, 20)
         meter_layout.setSpacing(12)
 
-        card_title = QLabel("Подключённый прибор")
+        card_title = QLabel("Подключённый счётчик")
         card_title.setObjectName("cardTitle")
 
         self.serial_label = QLabel("Серийный номер: —")
@@ -269,6 +281,45 @@ class MainWindow(QMainWindow):
         meter_layout.addWidget(card_title)
         meter_layout.addWidget(self.serial_label)
         meter_layout.addWidget(self.meter_status_label)
+
+        self.operation_panel = QFrame()
+        self.operation_panel.setObjectName("operationPanel")
+        self.operation_panel.setMinimumHeight(62)
+
+        operation_layout = QHBoxLayout(self.operation_panel)
+        operation_layout.setContentsMargins(12, 9, 12, 9)
+        operation_layout.setSpacing(12)
+
+        operation_text_layout = QVBoxLayout()
+        operation_text_layout.setContentsMargins(0, 0, 0, 0)
+        operation_text_layout.setSpacing(2)
+
+        self.operation_title_label = QLabel()
+        self.operation_title_label.setObjectName("operationTitle")
+        self.operation_title_label.setMinimumHeight(18)
+
+        self.operation_stage_label = QLabel()
+        self.operation_stage_label.setObjectName("operationStage")
+        self.operation_stage_label.setWordWrap(True)
+        self.operation_stage_label.setMinimumHeight(18)
+
+        self.operation_elapsed_label = QLabel("00:00")
+        self.operation_elapsed_label.setObjectName("operationElapsed")
+        self.operation_elapsed_label.setAlignment(
+            Qt.AlignmentFlag.AlignTop
+            | Qt.AlignmentFlag.AlignRight
+        )
+
+        operation_text_layout.addWidget(self.operation_title_label)
+        operation_text_layout.addWidget(self.operation_stage_label)
+
+        operation_layout.addLayout(
+            operation_text_layout,
+            stretch=1,
+        )
+        operation_layout.addWidget(self.operation_elapsed_label)
+
+        self.operation_panel.hide()
 
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(12)
@@ -311,6 +362,7 @@ class MainWindow(QMainWindow):
 
         root_layout.addLayout(header_layout)
         root_layout.addWidget(meter_card)
+        root_layout.addWidget(self.operation_panel)
         port_card = QFrame()
         port_card.setObjectName("card")
 
@@ -382,6 +434,111 @@ class MainWindow(QMainWindow):
         container.setObjectName("rootContainer")
         container.setLayout(root_layout)
         self.setCentralWidget(container)
+
+    def _begin_operation(
+        self,
+        title: str,
+        stage: str,
+    ) -> None:
+        """Показывает оператору выполнение фоновой операции."""
+        self._operation_started_at = time.monotonic()
+        self._operation_title = title
+        self._operation_indicator_on = True
+
+        self.operation_stage_label.setText(stage)
+        self.operation_panel.show()
+        self._operation_timer.start()
+        self._update_operation_indicator()
+
+        self.meter_status_label.setText(
+            f"Выполняется операция: {title}."
+        )
+        self.meter_status_label.setStyleSheet(
+            "color: #61708A;"
+        )
+
+        if not self._operation_cursor_active:
+            QApplication.setOverrideCursor(
+                Qt.CursorShape.WaitCursor
+            )
+            self._operation_cursor_active = True
+
+    def _set_operation_stage(self, stage: str) -> None:
+        """Меняет отображаемый этап текущей операции."""
+        if self._operation_started_at is not None:
+            self.operation_stage_label.setText(stage)
+
+    def _update_operation_indicator(self) -> None:
+        """Обновляет индикатор и длительность операции."""
+        if self._operation_started_at is None:
+            return
+
+        self._operation_indicator_on = (
+            not self._operation_indicator_on
+        )
+        marker = "●" if self._operation_indicator_on else "○"
+
+        self.operation_title_label.setText(
+            f"{marker} {self._operation_title}"
+        )
+
+        elapsed = int(
+            time.monotonic() - self._operation_started_at
+        )
+        self.operation_elapsed_label.setText(
+            f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+        )
+
+    def _finish_operation(self) -> None:
+        """Скрывает панель выполнения и возвращает обычный курсор."""
+        self._operation_timer.stop()
+        self._operation_started_at = None
+        self.operation_panel.hide()
+
+        if self._operation_cursor_active:
+            QApplication.restoreOverrideCursor()
+            self._operation_cursor_active = False
+
+    def _set_meter_result(
+        self,
+        text: str,
+        state: str,
+    ) -> None:
+        """Показывает итог операции заметной статусной плашкой."""
+        styles = {
+            "success": (
+                "color: #075B32;"
+                "background-color: #E4F7EC;"
+                "border-left: 4px solid #168447;"
+                "border-radius: 6px;"
+                "padding: 8px 10px;"
+            ),
+            "error": (
+                "color: #9F1C14;"
+                "background-color: #FDECEA;"
+                "border-left: 4px solid #C63228;"
+                "border-radius: 6px;"
+                "padding: 8px 10px;"
+            ),
+            "neutral": (
+                "color: #42516A;"
+                "background-color: #EEF3FA;"
+                "border-left: 4px solid #71809A;"
+                "border-radius: 6px;"
+                "padding: 8px 10px;"
+            ),
+        }
+
+        prefixes = {
+            "success": "✓",
+            "error": "⚠",
+            "neutral": "●",
+        }
+
+        self.meter_status_label.setText(
+            f"{prefixes[state]} {text}"
+        )
+        self.meter_status_label.setStyleSheet(styles[state])
 
     def _refresh_meter_ports(self) -> None:
         """Обновляет список доступных COM-портов."""
@@ -498,8 +655,12 @@ class MainWindow(QMainWindow):
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
+        self._begin_operation(
+            "Чтение счётчика",
+            f"Подключение к оптической головке {selected_port}...",
+        )
         self.meter_status_label.setText(
-            f"Считывание номера ПУ через {selected_port}..."
+            f"Считывание номера счётчика через {selected_port}..."
         )
 
         thread = QThread(self)
@@ -520,8 +681,8 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _show_read_progress(self, message: str) -> None:
-        """Показывает текущий безопасный этап чтения."""
-        self.meter_status_label.setText(message)
+        """Показывает текущий этап чтения."""
+        self._set_operation_stage(message)
 
     def _apply_read_serial_number(
         self,
@@ -530,7 +691,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Регистрирует успешно считанный ПУ и обновляет окно."""
         meter, was_created = self.registry.get_or_create(serial_number)
-
+        self._finish_operation()
         self.current_meter = meter
         self.serial_label.setText(
             f"Серийный номер: {meter.serial_number}"
@@ -542,14 +703,16 @@ class MainWindow(QMainWindow):
             MeterStatus.RESET,
         }:
             if was_created:
-                self.meter_status_label.setText(
+                self._set_meter_result(
                     f"ПУ считан за {elapsed_seconds:.1f} с и внесён "
-                    "в реестр. Доступно формирование нового HLS."
+                    "в реестр. Доступно формирование нового HLS.",
+                    "success",
                 )
             else:
-                self.meter_status_label.setText(
+                self._set_meter_result(
                     f"ПУ считан за {elapsed_seconds:.1f} с и уже есть "
-                    "в реестре. Доступно формирование нового HLS."
+                    "в реестре. Доступно формирование нового HLS.",
+                    "success",
                 )
 
             self.system_status_label.setText(
@@ -560,18 +723,20 @@ class MainWindow(QMainWindow):
             return
 
         if meter.status == MeterStatus.OPERATION_UNCONFIRMED:
-            self.meter_status_label.setText(
+            self._set_meter_result(
                 "Новый HLS сформирован, но запись в ПУ не подтверждена. "
-                "Повторное формирование заблокировано."
+                "Повторное формирование заблокировано.",
+                "error",
             )
             self.write_button.setEnabled(False)
             self.reset_button.setEnabled(False)
             return
 
         if meter.status == MeterStatus.PERSONALIZED:
-            self.meter_status_label.setText(
+            self._set_meter_result(
                 "Новый HLS подтверждён. Доступен физический "
-                "сброс до заводского HLS."
+                "сброс до заводского HLS.",
+                "success",
             )
             self.system_status_label.setText(
                 "Реестр: SQL Server · HLS активен"
@@ -580,18 +745,21 @@ class MainWindow(QMainWindow):
             self.reset_button.setEnabled(True)
             return
 
-        self.meter_status_label.setText(
-            "Текущий статус ПУ не позволяет записать новый HLS."
+        self._set_meter_result(
+            "Текущий статус ПУ не позволяет записать новый HLS.",
+            "neutral",
         )
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(True)
 
     def _handle_read_failure(self, error_text: str) -> None:
         """Показывает безопасное сообщение об ошибке чтения."""
+        self._finish_operation()
         self.current_meter = None
         self.serial_label.setText("Серийный номер: —")
-        self.meter_status_label.setText(
-            "Не удалось считать номер подключённого ПУ."
+        self._set_meter_result(
+            "Не удалось считать номер подключённого ПУ.",
+            "error",
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · Ошибка чтения ПУ"
@@ -667,6 +835,10 @@ class MainWindow(QMainWindow):
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
         self.meter_port_combo.setEnabled(False)
+        self._begin_operation(
+            "Запись нового HLS",
+            "Подготовка защищённого сеанса с ПУ...",
+        )
         self.meter_status_label.setText(
             "Подготовка записи нового HLS..."
         )
@@ -697,8 +869,8 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _show_hls_progress(self, message: str) -> None:
-        """Показывает безопасный этап записи HLS."""
-        self.meter_status_label.setText(message)
+        """Показывает текущий этап записи HLS."""
+        self._set_operation_stage(message)
 
     def _apply_hls_success(
         self,
@@ -710,10 +882,11 @@ class MainWindow(QMainWindow):
             f"Серийный номер: {serial_number}"
         )
         self._refresh_operations()
-
-        self.meter_status_label.setText(
+        self._finish_operation()
+        self._set_meter_result(
             f"Новый HLS записан и подтверждён за "
-            f"{elapsed_seconds:.1f} с."
+            f"{elapsed_seconds:.1f} с.",
+            "success",
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · HLS активен"
@@ -725,10 +898,11 @@ class MainWindow(QMainWindow):
     def _handle_hls_failure(self, error_text: str) -> None:
         """Блокирует повторную запись после неподтверждённого сбоя."""
         self._refresh_operations()
-
-        self.meter_status_label.setText(
+        self._finish_operation()
+        self._set_meter_result(
             "Запись HLS не подтверждена. "
-            "Повторная запись заблокирована."
+            "Повторная запись заблокирована.",
+            "error",
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · Состояние HLS неизвестно"
@@ -802,6 +976,10 @@ class MainWindow(QMainWindow):
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
         self.meter_port_combo.setEnabled(False)
+        self._begin_operation(
+            "Сброс HLS",
+            "Подготовка возврата к заводскому HLS...",
+        )
         self.meter_status_label.setText(
             "Возврат ПУ к заводскому HLS..."
         )
@@ -839,10 +1017,11 @@ class MainWindow(QMainWindow):
             f"Серийный номер: {serial_number}"
         )
         self._refresh_operations()
-
-        self.meter_status_label.setText(
+        self._finish_operation()
+        self._set_meter_result(
             f"Заводской HLS восстановлен и подтверждён за "
-            f"{elapsed_seconds:.1f} с. Доступна новая запись HLS."
+            f"{elapsed_seconds:.1f} с. Доступна новая запись HLS.",
+            "success",
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · HLS сброшен"
@@ -856,14 +1035,15 @@ class MainWindow(QMainWindow):
         error_text: str,
     ) -> None:
         """Блокирует действия при неподтверждённом сбросе."""
-        self.meter_status_label.setText(
+        self._set_meter_result(
             "Сброс HLS не подтверждён. Повторные действия "
-            "в текущем окне заблокированы."
+            "в текущем окне заблокированы.",
+            "error",
         )
         self.system_status_label.setText(
             "Реестр: SQL Server · Требуется проверка ПУ"
         )
-
+        self._finish_operation()
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
 
@@ -917,6 +1097,27 @@ def apply_application_style(app: QApplication) -> None:
             border-radius: 8px;
             padding: 8px 12px;
         }
+
+        QFrame#operationPanel {
+            background-color: #EEF4FF;
+            border: 1px solid #C9D8FF;
+            border-radius: 8px;
+        }
+
+        QLabel#operationTitle {
+            color: #1E4FC4;
+            font-weight: 700;
+        }
+
+        QLabel#operationStage {
+            color: #42516A;
+        }
+
+        QLabel#operationElapsed {
+            color: #536076;
+            font-family: "Consolas";
+            font-weight: 600;
+        }        
 
         QFrame#card {
             background-color: white;

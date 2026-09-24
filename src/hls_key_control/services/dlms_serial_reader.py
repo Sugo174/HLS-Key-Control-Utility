@@ -171,7 +171,7 @@ def read_meter_serial_number(
 
     _report_progress(
         progress,
-        "Получение счётчика вызовов ПУ...",
+        "Проверка защищённого соединения...",
     )
     invocation_counter = read_invocation_counter(port)
 
@@ -179,7 +179,7 @@ def read_meter_serial_number(
 
     _report_progress(
         progress,
-        "Открытие защищённого HLS-сеанса...",
+        "Подключение к счётчику...",
     )
     client = create_dlms_client()
     client.ciphering.invocationCounter = invocation_counter + 1
@@ -203,7 +203,7 @@ def read_meter_serial_number(
 
         _report_progress(
             progress,
-            "Считывание серийного номера ПУ...",
+            "Считывание серийного номера...",
         )
 
         serial_object = GXDLMSData(dlms_settings.serial_number_obis)

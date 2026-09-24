@@ -129,7 +129,7 @@ def write_hls_password(
                     "за 3 попытки."
                 ) from error
 
-            time.sleep(2.0)
+            time.sleep(5.0)
 
         finally:
             if connection is not None:
