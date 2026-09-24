@@ -33,6 +33,8 @@ class OperationType(StrEnum):
     METER_FOUND = "meter_found"
     HLS_RESERVED = "hls_reserved"
     HLS_RESET = "hls_reset"
+    HLS_ACTIVATED = "hls_activated"
+    HLS_WRITE_UNCONFIRMED = "hls_write_unconfirmed"
 
 
 @dataclass(slots=True)

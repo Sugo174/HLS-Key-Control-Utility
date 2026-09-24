@@ -118,6 +118,191 @@ class SqlHlsKeyRepository:
         finally:
             connection.close()
 
+    def get_reserved_hls_password(self, meter: Meter) -> str:
+        """Возвращает расшифрованный резерв только для записи в ПУ."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    m.status AS meter_status,
+                    m.current_hls_key_id,
+                    h.status AS hls_status,
+                    h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE m.serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if row is None:
+                raise ValueError(
+                    "Для ПУ нет зарезервированного HLS."
+                )
+
+            if (
+                str(row.meter_status)
+                != MeterStatus.OPERATION_UNCONFIRMED.value
+                or str(row.hls_status)
+                != HlsKeyStatus.RESERVED.value
+            ):
+                raise ValueError(
+                    "HLS не находится в состоянии ожидания записи."
+                )
+
+            if row.encrypted_value is None:
+                raise RuntimeError(
+                    "В резерве HLS отсутствует защищённое значение."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
+    def confirm_hls_written(self, meter: Meter) -> None:
+        """Подтверждает HLS только после успешной проверки входа в ПУ."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or row.current_hls_key_id is None
+                or str(row.status)
+                != MeterStatus.OPERATION_UNCONFIRMED.value
+            ):
+                raise ValueError(
+                    "Нет HLS, ожидающего подтверждения записи."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.ACTIVE.value,
+                str(row.current_hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось подтвердить статус HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.PERSONALIZED.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_ACTIVATED,
+                "Новый HLS записан в ПУ и подтверждён входом.",
+            )
+
+            connection.commit()
+            meter.status = MeterStatus.PERSONALIZED
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def mark_hls_write_unconfirmed(self, meter: Meter) -> None:
+        """Блокирует повторную запись после сбоя физической операции."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or row.current_hls_key_id is None
+                or str(row.status)
+                != MeterStatus.OPERATION_UNCONFIRMED.value
+            ):
+                raise ValueError(
+                    "Нет HLS, для которого можно зафиксировать сбой."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.UNCONFIRMED.value,
+                str(row.current_hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+            )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.HLS_STATE_UNKNOWN.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_WRITE_UNCONFIRMED,
+                "Связь при записи HLS не подтверждена. "
+                "Повторная запись заблокирована.",
+            )
+
+            connection.commit()
+            meter.status = MeterStatus.HLS_STATE_UNKNOWN
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     @staticmethod
     def _record_operation(
         cursor,
