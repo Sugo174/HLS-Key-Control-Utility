@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # Local secrets and machine-specific settings
 .env
@@ -10,6 +11,6 @@ config.local.*
 # IDE files
 .vscode/settings.json
 
-*.egg-info/
-
+#export and log folders
 exports/
+logs/

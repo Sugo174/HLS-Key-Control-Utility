@@ -55,7 +55,13 @@ def verify_hls_state_after_reset_failure(
             meter,
             serial_number,
         )
-        repository.confirm_physical_reset(meter)
+        repository.confirm_physical_reset(
+            meter,
+            description=(
+                "Проверка состояния HLS: заводской HLS "
+                "подтверждён, предыдущий ключ отозван."
+            ),
+        )
 
         return HlsResetRecoveryResult(
             serial_number=serial_number,

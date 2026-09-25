@@ -79,6 +79,10 @@ from hls_key_control.services.export_preparation import (
     prepare_export_preview,
 )
 
+from hls_key_control.services.application_log import (
+    write_application_log,
+)
+
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 
 class MeterReadWorker(QObject):
@@ -306,15 +310,8 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(title)
         title_layout.addWidget(subtitle)
 
-        connection_status = QLabel("● Режим персонализации")
-        connection_status.setObjectName("connectionStatus")
-
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
-        header_layout.addWidget(
-            connection_status,
-            alignment=Qt.AlignmentFlag.AlignTop,
-        )
 
         meter_card = QFrame()
         meter_card.setObjectName("card")
@@ -434,8 +431,8 @@ class MainWindow(QMainWindow):
 
         buttons_layout.addWidget(self.read_button)
         buttons_layout.addWidget(self.write_button)
-        buttons_layout.addWidget(self.reset_button)
         buttons_layout.addWidget(self.recovery_button)
+        buttons_layout.addWidget(self.reset_button)
         buttons_layout.addWidget(self.export_button)
         buttons_layout.addStretch()
 
@@ -466,14 +463,18 @@ class MainWindow(QMainWindow):
             self._save_selected_meter_port
         )
 
-        refresh_ports_button = QPushButton("Обновить порты")
-        refresh_ports_button.setObjectName("secondaryButton")
-        refresh_ports_button.clicked.connect(
-            self._refresh_meter_ports
+        self.refresh_ports_button = QPushButton(
+            "Обновить порты"
+        )
+        self.refresh_ports_button.setObjectName(
+            "secondaryButton"
+        )
+        self.refresh_ports_button.clicked.connect(
+            self._refresh_meter_ports_from_button
         )
 
         port_controls.addWidget(self.meter_port_combo, stretch=1)
-        port_controls.addWidget(refresh_ports_button)
+        port_controls.addWidget(self.refresh_ports_button)
 
         self.meter_port_status_label = QLabel()
         self.meter_port_status_label.setObjectName("meterStatus")
@@ -624,6 +625,81 @@ class MainWindow(QMainWindow):
         )
         self.meter_status_label.setStyleSheet(styles[state])
 
+        serial_number = (
+            self.current_meter.serial_number
+            if self.current_meter is not None
+            else "неизвестный счётчик"
+        )
+        write_application_log(
+            f"{serial_number} · {text}"
+        )
+
+    def _refresh_meter_ports_from_button(self) -> None:
+        """Обновляет порты с понятной обратной связью."""
+        self.refresh_ports_button.setEnabled(False)
+        self.refresh_ports_button.setText("Обновляем...")
+        QApplication.processEvents()
+
+        try:
+            self._refresh_meter_ports()
+
+            selected_port = str(
+                self.meter_port_combo.currentData() or ""
+            )
+
+            if selected_port:
+                message = (
+                    "Список COM-портов обновлён.\n"
+                    f"Выбрана оптическая головка: {selected_port}."
+                )
+            else:
+                message = (
+                    "Список COM-портов обновлён.\n"
+                    "Выберите оптическую головку."
+                )
+
+            self.meter_port_status_label.setText(
+                message.replace("\n", " ")
+            )
+
+            dialog = QDialog(self)
+            dialog.setObjectName("confirmationDialog")
+            dialog.setWindowTitle("Порты обновлены")
+            dialog.setMinimumWidth(380)
+
+            dialog_layout = QVBoxLayout(dialog)
+            dialog_layout.setContentsMargins(24, 22, 24, 22)
+            dialog_layout.setSpacing(14)
+
+            title = QLabel("Порты обновлены")
+            title.setObjectName("confirmationTitle")
+
+            description = QLabel(message)
+            description.setWordWrap(True)
+
+            buttons_layout = QHBoxLayout()
+            buttons_layout.addStretch()
+
+            ok_button = QPushButton("ОК")
+            ok_button.setObjectName("primaryButton")
+            ok_button.setDefault(True)
+            ok_button.clicked.connect(dialog.accept)
+
+            buttons_layout.addWidget(ok_button)
+
+            dialog_layout.addWidget(title)
+            dialog_layout.addWidget(description)
+            dialog_layout.addLayout(buttons_layout)
+
+            dialog.exec()
+
+        finally:
+            self.refresh_ports_button.setText(
+                "Обновить порты"
+            )
+            self.refresh_ports_button.setEnabled(True)
+
+
     def _refresh_meter_ports(self) -> None:
         """Обновляет список доступных COM-портов."""
         selected_port = self.meter_port_combo.currentData()
@@ -759,6 +835,11 @@ class MainWindow(QMainWindow):
             Qt.CursorShape.WaitCursor
         )
 
+        error_title = None
+        error_text = None
+        batch = None
+        file_path = None
+
         try:
             batch, file_path = create_excel_export_from_preview(
                 preview_items=preview_items,
@@ -766,33 +847,67 @@ class MainWindow(QMainWindow):
                 order_number=dialog.order_number,
             )
         except ValueError as error:
-            QMessageBox.warning(
-                self,
-                "Выгрузка не создана",
-                str(error),
-            )
+            error_title = "Выгрузка не создана"
+            error_text = str(error)
         except Exception as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка создания Excel-файла",
-                str(error),
-            )
-        else:
-            self._refresh_operations()
-            self.system_status_label.setText(
-                "Реестр: SQL Server · Excel-выгрузка создана"
-            )
-
-            QMessageBox.information(
-                self,
-                "Excel-файл создан",
-                f"Партия {batch.number} сформирована.\n\n"
-                f"Строк: {batch.row_count}\n"
-                f"Файл: {file_path}",
-            )
+            error_title = "Ошибка создания Excel-файла"
+            error_text = str(error)
         finally:
             QApplication.restoreOverrideCursor()
             self.export_button.setEnabled(True)
+
+        if error_text is not None:
+            QMessageBox.warning(
+                self,
+                error_title,
+                error_text,
+            )
+            return
+
+        self._refresh_operations()
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Excel-выгрузка создана"
+        )
+
+        write_application_log(
+            f"Excel-выгрузка создана: партия "
+            f"{batch.number}, строк: {batch.row_count}, "
+            f"файл: {file_path.name}."
+        )
+
+        result_dialog = QDialog(self)
+        result_dialog.setObjectName("confirmationDialog")
+        result_dialog.setWindowTitle("Excel-файл создан")
+        result_dialog.setMinimumWidth(500)
+
+        result_layout = QVBoxLayout(result_dialog)
+        result_layout.setContentsMargins(24, 22, 24, 22)
+        result_layout.setSpacing(14)
+
+        title = QLabel("Excel-файл экспортирован")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            f"Строк выгружено: {batch.row_count}\n"
+            f"Файл:\n{file_path}"
+        )
+        description.setWordWrap(True)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        ok_button = QPushButton("ОК")
+        ok_button.setObjectName("primaryButton")
+        ok_button.setDefault(True)
+        ok_button.clicked.connect(result_dialog.accept)
+
+        buttons_layout.addWidget(ok_button)
+
+        result_layout.addWidget(title)
+        result_layout.addWidget(description)
+        result_layout.addLayout(buttons_layout)
+
+        result_dialog.exec()
 
     def _read_meter_number(self) -> None:
         """Запускает чтение номера ПУ в фоновом потоке."""
@@ -986,30 +1101,51 @@ class MainWindow(QMainWindow):
             )
             return
 
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog = QDialog(self)
+        dialog.setObjectName("confirmationDialog")
         dialog.setWindowTitle("Подтверждение записи HLS")
-        dialog.setText(
-            "Будет создан и записан новый HLS-пароль в ПУ. "
+        dialog.setMinimumWidth(470)
+
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(24, 22, 24, 22)
+        dialog_layout.setSpacing(14)
+
+        title = QLabel("Записать новый HLS?")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            "Будет создан и записан новый HLS-пароль в счётчик. "
             "Прежний HLS перестанет работать."
         )
-        dialog.setInformativeText(
-            "Не отключайте оптическую головку и питание ПУ "
+        description.setWordWrap(True)
+
+        warning = QLabel(
+            "Не отключайте оптическую головку и питание "
             "до завершения проверки нового HLS."
         )
+        warning.setObjectName("confirmationWarning")
+        warning.setWordWrap(True)
 
-        dialog.addButton(
-            "Отмена",
-            QMessageBox.ButtonRole.RejectRole,
-        )
-        confirm_button = dialog.addButton(
-            "Записать новый HLS",
-            QMessageBox.ButtonRole.AcceptRole,
-        )
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
 
-        dialog.exec()
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setObjectName("secondaryButton")
+        cancel_button.clicked.connect(dialog.reject)
 
-        if dialog.clickedButton() is not confirm_button:
+        confirm_button = QPushButton("Записать новый HLS")
+        confirm_button.setObjectName("primaryButton")
+        confirm_button.clicked.connect(dialog.accept)
+
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(confirm_button)
+
+        dialog_layout.addWidget(title)
+        dialog_layout.addWidget(description)
+        dialog_layout.addWidget(warning)
+        dialog_layout.addLayout(buttons_layout)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         try:
@@ -1199,11 +1335,11 @@ class MainWindow(QMainWindow):
         if result.factory_hls_confirmed:
             self._set_meter_result(
                 f"Заводской HLS подтверждён за "
-                f"{elapsed_seconds:.1f} с. Сброс состоялся.",
+                f"{elapsed_seconds:.1f} с. Реестр обновлён.",
                 "success",
             )
             self.system_status_label.setText(
-                "Реестр: SQL Server · HLS сброшен"
+                "Реестр: SQL Server · Заводской HLS подтверждён"
             )
             self.write_button.setEnabled(True)
             self.reset_button.setEnabled(False)
@@ -1277,30 +1413,53 @@ class MainWindow(QMainWindow):
             )
             return
 
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog = QDialog(self)
+        dialog.setObjectName("confirmationDialog")
         dialog.setWindowTitle("Подтверждение сброса HLS")
-        dialog.setText(
-            "ПУ будет возвращён к заводскому HLS. "
+        dialog.setMinimumWidth(470)
+
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(24, 22, 24, 22)
+        dialog_layout.setSpacing(14)
+
+        title = QLabel("Вернуть заводской HLS?")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            "Счётчик будет возвращён к заводскому HLS. "
             "Текущий персональный HLS перестанет работать."
         )
-        dialog.setInformativeText(
-            "Будет выполнена запись заводского HLS, затем "
-            "проверка входа в ПУ. Не отключайте головку и питание."
-        )
+        description.setWordWrap(True)
 
-        dialog.addButton(
-            "Отмена",
-            QMessageBox.ButtonRole.RejectRole,
+        warning = QLabel(
+            "Не отключайте оптическую головку и питание "
+            "до завершения проверки."
         )
-        confirm_button = dialog.addButton(
-            "Вернуть заводской HLS",
-            QMessageBox.ButtonRole.DestructiveRole,
+        warning.setObjectName("confirmationWarning")
+        warning.setWordWrap(True)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setObjectName("secondaryButton")
+        cancel_button.clicked.connect(dialog.reject)
+
+        confirm_button = QPushButton(
+            "Вернуть заводской HLS"
         )
+        confirm_button.setObjectName("dangerButton")
+        confirm_button.clicked.connect(dialog.accept)
 
-        dialog.exec()
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(confirm_button)
 
-        if dialog.clickedButton() is not confirm_button:
+        dialog_layout.addWidget(title)
+        dialog_layout.addWidget(description)
+        dialog_layout.addWidget(warning)
+        dialog_layout.addLayout(buttons_layout)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         self.read_button.setEnabled(False)
@@ -1439,6 +1598,23 @@ def apply_application_style(app: QApplication) -> None:
             background-color: #F6F8FB;
         }
 
+        QDialog#confirmationDialog {
+            background-color: #F6F8FB;
+        }
+
+        QLabel#confirmationTitle {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        QLabel#confirmationWarning {
+            color: #9F1C14;
+            background-color: #FDECEA;
+            border-left: 4px solid #C63228;
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+
         QLabel {
             background-color: transparent;
         }
@@ -1517,6 +1693,12 @@ def apply_application_style(app: QApplication) -> None:
             border: 1px solid #2864D7;
         }
 
+        QPushButton#dangerButton {
+            color: white;
+            background-color: #C63228;
+            border: 1px solid #C63228;
+        }
+
         QPushButton#secondaryButton {
             color: #34435C;
             background-color: white;
@@ -1525,7 +1707,8 @@ def apply_application_style(app: QApplication) -> None:
 
         QPushButton#readButton:disabled,
         QPushButton#primaryButton:disabled,
-        QPushButton#secondaryButton:disabled {
+        QPushButton#secondaryButton:disabled,
+        QPushButton#dangerButton:disabled {
             color: #9AA6B8;
             background-color: #E9EDF3;
             border: 1px solid #E9EDF3;

@@ -615,7 +615,11 @@ class SqlHlsKeyRepository:
         )
 
 
-    def confirm_physical_reset(self, meter: Meter) -> None:
+    def confirm_physical_reset(
+        self,
+        meter: Meter,
+        description: str | None = None,
+    ) -> None:
         """Фиксирует сброс только после проверки заводского HLS в ПУ."""
         connection = open_connection()
 
@@ -672,7 +676,9 @@ class SqlHlsKeyRepository:
                 cursor,
                 str(meter_row.meter_id),
                 OperationType.HLS_RESET,
-                "HLS сброшен, предыдущий ключ отозван.",
+                description or (
+                    "HLS сброшен, предыдущий ключ отозван."
+                ),
             )
 
             connection.commit()

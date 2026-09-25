@@ -193,14 +193,14 @@ def _build_export_file_name(batch: ExportBatch) -> str:
 
         return result
 
-    created_date = _to_local_time(
+    created_timestamp = _to_local_time(
         batch.created_at
-    ).strftime("%Y-%m-%d")
+    ).strftime("%Y-%m-%d_%H-%M-%S")
 
     return (
         f"HLS_{normalize(batch.customer_name)}_"
         f"{normalize(batch.order_number)}_"
-        f"{created_date}_{batch.number}.xlsx"
+        f"{created_timestamp}.xlsx"
     )
 
 
@@ -230,32 +230,53 @@ def _write_batch_sheet(
     value_format = workbook.add_format(
         {
             "border": 1,
+            "align": "center",
+            "valign": "vcenter",
         }
     )
     date_format = workbook.add_format(
         {
             "border": 1,
+            "align": "center",
+            "valign": "vcenter",
             "num_format": "dd.mm.yyyy hh:mm:ss",
         }
     )
-
+    worksheet.write("A3", "Номер заказа", label_format)
     created_at = _to_local_time(batch.created_at)
 
     worksheet.write("A1", "Экспортная партия HLS", title_format)
-    worksheet.write("A3", "Номер партии", label_format)
-    worksheet.write_string("B3", batch.number, value_format)
-    worksheet.write("A4", "Создана", label_format)
+    worksheet.write_string(
+        "B3",
+        batch.order_number,
+        value_format,
+    )
+    worksheet.write("A4", "Дата экспорта", label_format)
     worksheet.write_datetime("B4", created_at, date_format)
-    worksheet.write("A5", "Создал", label_format)
+    worksheet.write(
+        "A5",
+        "Экспортировал в Excel",
+        label_format,
+    )
     worksheet.write("B5", batch.created_by, value_format)
     worksheet.write("A6", "Заказчик", label_format)
-    worksheet.write("B6", batch.customer_name, value_format)
-    worksheet.write("A7", "Номер заказа", label_format)
-    worksheet.write("B7", batch.order_number, value_format)
-    worksheet.write("A8", "Количество счётчиков", label_format)
-    worksheet.write_number("B8", batch.row_count, value_format)
     worksheet.write(
-        "A10",
+        "B6",
+        batch.customer_name,
+        value_format,
+    )
+    worksheet.write(
+        "A7",
+        "Количество счётчиков",
+        label_format,
+    )
+    worksheet.write_number(
+        "B7",
+        batch.row_count,
+        value_format,
+    )
+    worksheet.write(
+        "A9",
         "Файл содержит конфиденциальные HLS-пароли.",
     )
 
@@ -301,8 +322,8 @@ def _write_meters_sheet(
 
     headers = [
         "№",
-        "Номер партии",
-        "Серийный номер ПУ",
+        "Номер заказа",
+        "Серийный номер счётчика",
         "Новый HLS",
         "Дата персонализации",
     ]
@@ -325,7 +346,7 @@ def _write_meters_sheet(
         worksheet.write_string(
             row_number,
             1,
-            batch.number,
+            batch.order_number,
             text_format,
         )
         worksheet.write_string(
