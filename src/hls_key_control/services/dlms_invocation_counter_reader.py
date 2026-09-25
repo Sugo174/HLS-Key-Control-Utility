@@ -15,6 +15,7 @@ from hls_key_control.services.dlms_serial_reader import (
     _open_mode_e_connection,
     _read_data_block,
     _read_packet,
+    _disconnect_dlms_session,
 )
 
 
@@ -53,12 +54,9 @@ def read_invocation_counter_from_connection(connection) -> int:
 
         value = client.updateValue(counter_object, 2, reply.value)
         return int(value)
+    
     finally:
-        disconnect = client.disconnectRequest()
-
-        if disconnect:
-            connection.write(bytes(disconnect))
-            connection.flush()
+        _disconnect_dlms_session(connection, client)
 
 
 def read_invocation_counter(

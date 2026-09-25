@@ -16,6 +16,7 @@ from hls_key_control.services.dlms_serial_reader import (
     _open_mode_e_connection,
     _read_data_block,
     _read_packet,
+    _close_dlms_connection,
 )
 
 
@@ -69,7 +70,6 @@ def write_hls_password(
                 reply,
             )
             client.parseUAResponse(reply.data)
-
             reply.clear()
             _read_data_block(
                 connection,
@@ -78,7 +78,6 @@ def write_hls_password(
                 reply,
             )
             client.parseAareResponse(reply.data)
-
             reply.clear()
             for request in client.getApplicationAssociationRequest():
                 _read_packet(
@@ -132,16 +131,10 @@ def write_hls_password(
             time.sleep(5.0)
 
         finally:
-            if connection is not None:
-                try:
-                    if client is not None:
-                        disconnect = client.disconnectRequest()
-
-                        if disconnect:
-                            connection.write(bytes(disconnect))
-                            connection.flush()
-                finally:
-                    connection.close()
+            if connection is not None and client is not None:
+                _close_dlms_connection(connection, client)
+            elif connection is not None:
+                connection.close()
 
     raise RuntimeError(
         "Не удалось подготовить защищённый сеанс с ПУ."

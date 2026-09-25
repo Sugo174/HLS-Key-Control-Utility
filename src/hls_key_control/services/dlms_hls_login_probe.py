@@ -21,6 +21,7 @@ from hls_key_control.services.dlms_serial_reader import (
     _open_mode_e_connection,
     _read_data_block,
     _read_packet,
+    _close_dlms_connection,
 )
 
 
@@ -95,14 +96,7 @@ def read_serial_number_with_hls_password(
 
         return serial_number
     finally:
-        try:
-            disconnect = client.disconnectRequest()
-
-            if disconnect:
-                connection.write(bytes(disconnect))
-                connection.flush()
-        finally:
-            connection.close()
+        _close_dlms_connection(connection, client)
 
 
 if __name__ == "__main__":

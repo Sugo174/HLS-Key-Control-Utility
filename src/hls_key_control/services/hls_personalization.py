@@ -47,6 +47,7 @@ def personalize_meter_hls(
             "Ответ на запись не получен. Проверяем новый HLS...",
         )
     except Exception:
+        repository.cancel_reserved_hls_before_write(meter)
         raise
 
     try:

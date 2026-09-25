@@ -283,6 +283,84 @@ class SqlHlsKeyRepository:
         finally:
             connection.close()
 
+    def cancel_reserved_hls_before_write(
+        self,
+        meter: Meter,
+    ) -> None:
+        """Отменяет резерв HLS, если команда записи в ПУ не отправлялась."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or row.current_hls_key_id is None
+                or str(row.status)
+                != MeterStatus.OPERATION_UNCONFIRMED.value
+            ):
+                raise ValueError(
+                    "Нет резерва HLS, ожидающего отмены."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.FAILED.value,
+                str(row.current_hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось отменить резерв HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET
+                    current_hls_key_id = NULL,
+                    status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.RESET.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_WRITE_REJECTED,
+                "Команда записи HLS не отправлялась; резерв отозван.",
+            )
+
+            connection.commit()
+            meter.current_hls_key_id = None
+            meter.status = MeterStatus.RESET
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def mark_hls_write_unconfirmed(self, meter: Meter) -> None:
         """Блокирует повторную запись после сбоя физической операции."""
         connection = open_connection()

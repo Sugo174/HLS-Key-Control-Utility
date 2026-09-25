@@ -2,6 +2,7 @@
 
 import time
 import serial
+import os
 
 from collections.abc import Callable
 
@@ -19,7 +20,6 @@ from hls_key_control.services.dlms_client_factory import (
 
 ProgressReporter = Callable[[str], None]
 
-
 def _report_progress(
     progress: ProgressReporter | None,
     message: str,
@@ -30,10 +30,7 @@ def _report_progress(
 
 
 def _read_hdlc_frame(connection: serial.Serial) -> bytes:
-    """Читает один HDLC-кадр от начального до конечного флага."""
-    frame = bytearray()
-    started = False
-
+    """Читает HDLC-кадр по длине из его заголовка."""
     while True:
         value = connection.read(1)
 
@@ -41,14 +38,32 @@ def _read_hdlc_frame(connection: serial.Serial) -> bytes:
             raise RuntimeError("ПУ не ответил на DLMS-запрос.")
 
         if value == b"\x7E":
-            if started:
-                frame.extend(value)
-                return bytes(frame)
+            break
 
-            started = True
+    header = connection.read(2)
 
-        if started:
-            frame.extend(value)
+    if len(header) != 2:
+        raise RuntimeError("ПУ вернул неполный заголовок HDLC-кадра.")
+
+    frame_length = (
+        ((header[0] & 0x07) << 8)
+        | header[1]
+    )
+
+    if frame_length < 3:
+        raise RuntimeError("ПУ вернул некорректную длину HDLC-кадра.")
+
+    remainder = connection.read(frame_length - 1)
+
+    if len(remainder) != frame_length - 1:
+        raise RuntimeError("ПУ вернул неполный HDLC-кадр.")
+
+    frame = b"\x7E" + header + remainder
+
+    if frame[-1:] != b"\x7E":
+        raise RuntimeError("ПУ вернул повреждённый HDLC-кадр.")
+
+    return frame
 
 
 def _read_packet(
@@ -66,14 +81,15 @@ def _read_packet(
             reply.clear()
             _read_packet(connection, client, packet, reply)
         return
-
+   
     connection.write(bytes(request))
     connection.flush()
 
     received = GXByteBuffer()
 
     while not client.getData(received, reply):
-        received.set(_read_hdlc_frame(connection))
+        frame = _read_hdlc_frame(connection)
+        received.set(frame)
 
     if reply.error != 0:
         raise RuntimeError(f"ПУ отклонил DLMS-запрос, код: {reply.error}.")
@@ -136,7 +152,7 @@ def _open_mode_e_connection(
 
         connection.write(b"\x06" + b"252\r\n")
         connection.flush()
-        time.sleep(1.0)
+        time.sleep(0.3)
 
         connection.baudrate = 9600
         connection.bytesize = serial.EIGHTBITS
@@ -149,6 +165,55 @@ def _open_mode_e_connection(
     except Exception:
         connection.close()
         raise
+
+
+def _disconnect_dlms_session(
+    connection: serial.Serial,
+    client,
+) -> None:
+    """Корректно завершает HDLC-сеанс и ждёт ответ ПУ."""
+    original_timeout = connection.timeout
+
+    try:
+        disconnect = client.disconnectRequest()
+
+        if not disconnect:
+            return
+
+        connection.timeout = max(
+            float(original_timeout or 0.0),
+            3.0,
+        )
+
+        reply = GXReplyData()
+        _read_packet(connection, client, disconnect, reply)
+
+        try:
+            client.parseUAResponse(reply.data)
+        except Exception:
+            pass
+    except Exception:
+        # Ошибка при завершении не должна скрыть результат
+        # основной операции.
+        pass
+    finally:
+        connection.timeout = original_timeout
+
+        try:
+            connection.reset_input_buffer()
+        except serial.SerialException:
+            pass
+
+
+def _close_dlms_connection(
+    connection: serial.Serial,
+    client,
+) -> None:
+    """Завершает DLMS-сеанс и закрывает COM-порт."""
+    try:
+        _disconnect_dlms_session(connection, client)
+    finally:
+        connection.close()
 
 
 def _as_serial_number(value: object) -> str:
@@ -173,7 +238,18 @@ def read_meter_serial_number(
         progress,
         "Проверка защищённого соединения...",
     )
-    invocation_counter = read_invocation_counter(port)
+
+    _report_progress(
+        progress,
+        "Проверка защищённого соединения...",
+    )
+    try:
+        invocation_counter = read_invocation_counter(port)
+    except Exception as error:
+        raise RuntimeError(
+            "Не удалось прочитать счётчик вызовов перед "
+            f"GMAC-сеансом: {error}"
+        ) from error
 
     time.sleep(1.0)
 
@@ -187,14 +263,16 @@ def read_meter_serial_number(
 
     try:
         reply = GXReplyData()
-
+        stage = "открытие HDLC-канала"
         _read_packet(connection, client, client.snrmRequest(), reply)
         client.parseUAResponse(reply.data)
 
         reply.clear()
+        stage = "установление DLMS-ассоциации"
         _read_data_block(connection, client, client.aarqRequest(), reply)
         client.parseAareResponse(reply.data)
 
+        stage = "GMAC-подтверждение"
         reply.clear()
         for request in client.getApplicationAssociationRequest():
             _read_packet(connection, client, request, reply)
@@ -205,7 +283,7 @@ def read_meter_serial_number(
             progress,
             "Считывание серийного номера...",
         )
-
+        stage = "чтение серийного номера"
         serial_object = GXDLMSData(dlms_settings.serial_number_obis)
         request = client.read(serial_object, 2)[0]
 
@@ -222,15 +300,12 @@ def read_meter_serial_number(
             raise RuntimeError("ПУ вернул пустой серийный номер.")
 
         return serial_number
+    except Exception as error:
+        raise RuntimeError(
+            f"GMAC-сеанс, этап «{stage}»: {error}"
+        ) from error 
     finally:
-        try:
-            disconnect = client.disconnectRequest()
-
-            if disconnect:
-                connection.write(bytes(disconnect))
-                connection.flush()
-        finally:
-            connection.close()
+        _close_dlms_connection(connection, client)
 
 
 if __name__ == "__main__":

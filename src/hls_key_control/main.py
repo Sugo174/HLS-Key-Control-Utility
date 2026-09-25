@@ -4,6 +4,7 @@ import sys
 import time
 
 from datetime import UTC
+from pathlib import Path
 
 from PySide6.QtCore import (
     QObject,
@@ -13,6 +14,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
+from PySide6.QtGui import QIcon, QPixmap
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -84,6 +86,9 @@ from hls_key_control.services.application_log import (
 )
 
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
+ASSETS_DIRECTORY = Path(__file__).resolve().parent / "assets"
+APP_ICON_PATH = ASSETS_DIRECTORY / "emis-electra-app.png"
+BRAND_LOGO_PATH = ASSETS_DIRECTORY / "emis-electra-logo.png"
 
 class MeterReadWorker(QObject):
     """Выполняет физическое чтение ПУ вне потока интерфейса."""
@@ -114,6 +119,11 @@ class MeterReadWorker(QObject):
                     )
                 except Exception as error:
                     last_error = error
+                    write_application_log(
+                        "Чтение счётчика: "
+                        f"попытка {attempt} из 3 не удалась. "
+                        f"Причина: {error}"
+                    )
 
                     if attempt < 3:
                         self.progress.emit(
@@ -124,7 +134,8 @@ class MeterReadWorker(QObject):
                         continue
 
                     raise RuntimeError(
-                        "Не удалось считать номер счётчика за 3 попытки."
+                        "Не удалось считать номер счётчика за 3 попытки. "
+                        f"Последняя причина: {error}"
                     ) from error
 
                 elapsed_seconds = time.monotonic() - started_at
@@ -276,6 +287,7 @@ class MainWindow(QMainWindow):
         )
 
         self.setWindowTitle("HLS Key Control Utility")
+        self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.setMinimumSize(860, 560)
 
         self._settings = QSettings(
@@ -296,6 +308,17 @@ class MainWindow(QMainWindow):
 
         header_layout = QHBoxLayout()
 
+        brand_logo = QLabel()
+        brand_logo.setObjectName("brandLogo")
+        brand_logo.setPixmap(
+            QPixmap(str(BRAND_LOGO_PATH)).scaledToWidth(
+                132,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        brand_logo.setFixedSize(132, 42)
+        brand_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         title_layout = QVBoxLayout()
         title_layout.setSpacing(2)
 
@@ -310,6 +333,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(title)
         title_layout.addWidget(subtitle)
 
+        header_layout.addWidget(brand_logo)
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
 
@@ -529,7 +553,6 @@ class MainWindow(QMainWindow):
         self._operation_started_at = time.monotonic()
         self._operation_title = title
         self._operation_indicator_on = True
-
         self.operation_stage_label.setText(stage)
         self.operation_panel.show()
         self._operation_timer.start()
@@ -814,12 +837,39 @@ class MainWindow(QMainWindow):
             return
 
         if not preview_items:
-            QMessageBox.information(
-                self,
-                "Нет данных для выгрузки",
+            result_dialog = QDialog(self)
+            result_dialog.setObjectName("confirmationDialog")
+            result_dialog.setWindowTitle("Нет данных для выгрузки")
+            result_dialog.setMinimumWidth(460)
+
+            result_layout = QVBoxLayout(result_dialog)
+            result_layout.setContentsMargins(24, 22, 24, 22)
+            result_layout.setSpacing(14)
+
+            title = QLabel("Нет данных для выгрузки")
+            title.setObjectName("confirmationTitle")
+
+            description = QLabel(
                 "Нет подтверждённых HLS, которые ещё не были "
-                "включены в экспортную партию.",
+                "включены в экспортную партию."
             )
+            description.setWordWrap(True)
+
+            buttons_layout = QHBoxLayout()
+            buttons_layout.addStretch()
+
+            ok_button = QPushButton("ОК")
+            ok_button.setObjectName("primaryButton")
+            ok_button.setDefault(True)
+            ok_button.clicked.connect(result_dialog.accept)
+
+            buttons_layout.addWidget(ok_button)
+
+            result_layout.addWidget(title)
+            result_layout.addWidget(description)
+            result_layout.addLayout(buttons_layout)
+
+            result_dialog.exec()
             return
 
         dialog = ExportPreparationDialog(
@@ -1589,17 +1639,17 @@ def apply_application_style(app: QApplication) -> None:
     app.setStyleSheet(
         """
         QWidget {
-            color: #172033;
+            color: #363630;
             font-family: "Segoe UI";
             font-size: 14px;
         }
 
         QWidget#rootContainer {
-            background-color: #F6F8FB;
+            background-color: #F2F3F5;
         }
 
         QDialog#confirmationDialog {
-            background-color: #F6F8FB;
+            background-color: #F2F3F5;
         }
 
         QLabel#confirmationTitle {
@@ -1627,36 +1677,36 @@ def apply_application_style(app: QApplication) -> None:
         QLabel#subtitle,
         QLabel#meterStatus,
         QLabel#systemStatus {
-            color: #61708A;
+            color: #51595C;
         }
 
         QLabel#connectionStatus {
-            color: #536076;
-            background-color: #E9EDF3;
+            color: #007A5E;
+            background-color: #E0F7ED;
             border-radius: 8px;
             padding: 8px 12px;
         }
 
         QFrame#operationPanel {
-            background-color: #EEF4FF;
-            border: 1px solid #C9D8FF;
+            background-color: #E0F7ED;
+            border: 1px solid #9DE4C0;
             border-radius: 8px;
         }
 
         QLabel#operationTitle {
-            color: #1E4FC4;
+            color: #007A5E;
             font-weight: 700;
         }
 
         QLabel#operationStage {
-            color: #42516A;
+            color: #51595C;
         }
 
         QLabel#operationElapsed {
-            color: #536076;
+            color: #007A5E;
             font-family: "Consolas";
             font-weight: 600;
-        }        
+        }
 
         QFrame#card {
             background-color: white;
@@ -1682,15 +1732,32 @@ def apply_application_style(app: QApplication) -> None:
         }
 
         QPushButton#readButton {
-            color: #1E4FC4;
-            background-color: #EAF0FF;
-            border: 1px solid #C9D8FF;
+            color: #007A5E;
+            background-color: #E0F7ED;
+            border: 1px solid #9DE4C0;
+        }
+
+        QPushButton#readButton:hover,
+        QPushButton#secondaryButton:hover {
+            color: #007A5E;
+            background-color: #F2FBF6;
+            border: 1px solid #00DB78;
         }
 
         QPushButton#primaryButton {
             color: white;
-            background-color: #2864D7;
-            border: 1px solid #2864D7;
+            background-color: #009975;
+            border: 1px solid #009975;
+        }
+
+        QPushButton#primaryButton:hover {
+            background-color: #007A5E;
+            border: 1px solid #007A5E;
+        }
+
+        QPushButton#primaryButton:pressed {
+            background-color: #007A5E;
+            border: 1px solid #007A5E;
         }
 
         QPushButton#dangerButton {
@@ -1700,9 +1767,9 @@ def apply_application_style(app: QApplication) -> None:
         }
 
         QPushButton#secondaryButton {
-            color: #34435C;
+            color: #007A5E;
             background-color: white;
-            border: 1px solid #CCD5E2;
+            border: 1px solid #9DE4C0;
         }
 
         QPushButton#readButton:disabled,
@@ -1734,6 +1801,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationDisplayName("HLS Key Control Utility")
+    app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
     apply_application_style(app)
 
