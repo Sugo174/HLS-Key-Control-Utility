@@ -1,19 +1,107 @@
 """Создание Excel-файлов подтверждённых HLS-партий."""
 
 import hashlib
+import re
 import socket
 
 from datetime import UTC, datetime
 from getpass import getuser
 from pathlib import Path
-
 import xlsxwriter
-
 from hls_key_control.domain.models import ExportBatch
+
 from hls_key_control.infrastructure.export_batch_repository import (
     SqlExportBatchRepository,
 )
+
 from hls_key_control.services.hls_protection import HlsProtector
+
+from hls_key_control.services.export_preparation import (
+    ExportPreviewItem,
+)
+
+
+def create_excel_export_from_preview(
+    preview_items: list[ExportPreviewItem],
+    customer_name: str,
+    order_number: str,
+    output_directory: Path | None = None,
+) -> tuple[ExportBatch, Path]:
+    """Создаёт Excel из состава, показанного оператору."""
+    if output_directory is None:
+        output_directory = Path.cwd() / "exports"
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    created_by = f"{getuser()}@{socket.gethostname()}"
+    repository = SqlExportBatchRepository()
+    batch = repository.create_batch_for_candidates(
+        created_by=created_by,
+        customer_name=customer_name,
+        order_number=order_number,
+        hls_key_ids=[
+            item.hls_key_id
+            for item in preview_items
+        ],
+    )
+
+    file_name = _build_export_file_name(batch)
+    target_path = output_directory / file_name
+    temporary_path = output_directory / (
+        f"{batch.number}.temporary.xlsx"
+    )
+
+    if target_path.exists():
+        raise RuntimeError(
+            "Файл для этой экспортной партии уже существует."
+        )
+
+    protector = HlsProtector()
+    items = repository.get_batch_items(batch)
+
+    try:
+        workbook = xlsxwriter.Workbook(
+            str(temporary_path),
+            {
+                "strings_to_numbers": False,
+                "strings_to_formulas": False,
+                "strings_to_urls": False,
+            },
+        )
+
+        try:
+            _write_batch_sheet(workbook, batch)
+            _write_meters_sheet(
+                workbook,
+                batch,
+                items,
+                protector,
+            )
+        finally:
+            workbook.close()
+
+        temporary_path.replace(target_path)
+    except Exception:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+        raise
+
+    file_sha256 = _calculate_file_sha256(target_path)
+
+    try:
+        repository.complete_batch(
+            batch,
+            target_path.name,
+            file_sha256,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "Excel-файл создан, но не удалось подтвердить "
+            "выгрузку в SQL Server. Не создавайте новую партию."
+        ) from error
+
+    return batch, target_path
 
 
 def create_next_excel_export(
@@ -87,6 +175,35 @@ def create_next_excel_export(
     return batch, target_path
 
 
+def _build_export_file_name(batch: ExportBatch) -> str:
+    """Формирует безопасное и уникальное имя Excel-файла."""
+    def normalize(value: str) -> str:
+        result = re.sub(
+            r"[^0-9A-Za-zА-Яа-яЁё._-]+",
+            "_",
+            value.strip(),
+        )
+        result = result.strip("._")
+
+        if not result:
+            raise ValueError(
+                "Заказчик или номер заказа не подходят "
+                "для имени файла."
+            )
+
+        return result
+
+    created_date = _to_local_time(
+        batch.created_at
+    ).strftime("%Y-%m-%d")
+
+    return (
+        f"HLS_{normalize(batch.customer_name)}_"
+        f"{normalize(batch.order_number)}_"
+        f"{created_date}_{batch.number}.xlsx"
+    )
+
+
 def _write_batch_sheet(
     workbook: xlsxwriter.Workbook,
     batch: ExportBatch,
@@ -131,10 +248,14 @@ def _write_batch_sheet(
     worksheet.write_datetime("B4", created_at, date_format)
     worksheet.write("A5", "Создал", label_format)
     worksheet.write("B5", batch.created_by, value_format)
-    worksheet.write("A6", "Количество ПУ", label_format)
-    worksheet.write_number("B6", batch.row_count, value_format)
+    worksheet.write("A6", "Заказчик", label_format)
+    worksheet.write("B6", batch.customer_name, value_format)
+    worksheet.write("A7", "Номер заказа", label_format)
+    worksheet.write("B7", batch.order_number, value_format)
+    worksheet.write("A8", "Количество счётчиков", label_format)
+    worksheet.write_number("B8", batch.row_count, value_format)
     worksheet.write(
-        "A8",
+        "A10",
         "Файл содержит конфиденциальные HLS-пароли.",
     )
 

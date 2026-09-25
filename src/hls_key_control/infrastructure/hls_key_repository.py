@@ -425,6 +425,172 @@ class SqlHlsKeyRepository:
         finally:
             connection.close()
 
+    def mark_reset_unconfirmed(self, meter: Meter) -> None:
+        """Блокирует действия после неподтверждённого сброса HLS."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or row.current_hls_key_id is None
+                or str(row.status)
+                != MeterStatus.PERSONALIZED.value
+            ):
+                raise ValueError(
+                    "Для счётчика нельзя зафиксировать "
+                    "неподтверждённый сброс HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.HLS_STATE_UNKNOWN.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_RESET,
+                "Связь при сбросе HLS не подтверждена. "
+                "Требуется проверка состояния HLS.",
+            )
+
+            connection.commit()
+            meter.status = MeterStatus.HLS_STATE_UNKNOWN
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def get_active_hls_password_for_reset_recovery(
+        self,
+        meter: Meter,
+    ) -> str:
+        """Возвращает активный HLS только для проверки после сбоя сброса."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT
+                    m.status AS meter_status,
+                    h.status AS hls_status,
+                    h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE m.serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or str(row.meter_status)
+                != MeterStatus.HLS_STATE_UNKNOWN.value
+                or str(row.hls_status)
+                != HlsKeyStatus.ACTIVE.value
+                or row.encrypted_value is None
+            ):
+                raise ValueError(
+                    "Для счётчика нет активного HLS "
+                    "для проверки состояния."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
+    def confirm_active_hls_after_reset_check(
+        self,
+        meter: Meter,
+    ) -> None:
+        """Возвращает статус active после успешной проверки HLS."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT
+                    m.meter_id,
+                    m.status,
+                    h.status AS hls_status
+                FROM dbo.Meters AS m WITH (
+                    UPDLOCK,
+                    SERIALIZABLE
+                )
+                INNER JOIN dbo.HlsKeys AS h WITH (
+                    UPDLOCK,
+                    SERIALIZABLE
+                )
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE m.serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if (
+                row is None
+                or str(row.status)
+                != MeterStatus.HLS_STATE_UNKNOWN.value
+                or str(row.hls_status)
+                != HlsKeyStatus.ACTIVE.value
+            ):
+                raise ValueError(
+                    "Состояние счётчика нельзя подтвердить "
+                    "как персонализированное."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.PERSONALIZED.value,
+                str(row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(row.meter_id),
+                OperationType.HLS_RESET,
+                "Проверка состояния HLS: персональный HLS "
+                "подтверждён, сброс не состоялся.",
+            )
+
+            connection.commit()
+            meter.status = MeterStatus.PERSONALIZED
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _record_operation(

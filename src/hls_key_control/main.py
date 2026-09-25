@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QComboBox,
+    QDialog,
 )
 
 from hls_key_control.domain.models import (
@@ -60,6 +61,22 @@ from hls_key_control.services.hls_personalization import (
 
 from hls_key_control.services.hls_factory_reset import (
     reset_meter_to_factory_hls,
+)
+
+from hls_key_control.services.hls_reset_recovery import (
+    verify_hls_state_after_reset_failure,
+)
+
+from hls_key_control.export_preparation_dialog import (
+    ExportPreparationDialog,
+)
+
+from hls_key_control.services.excel_export import (
+    create_excel_export_from_preview,
+)
+
+from hls_key_control.services.export_preparation import (
+    prepare_export_preview,
 )
 
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
@@ -187,6 +204,44 @@ class HlsFactoryResetWorker(QObject):
             self.finished.emit()
 
 
+class HlsResetRecoveryWorker(QObject):
+    """Проверяет HLS после неподтверждённого сброса."""
+
+    progress = Signal(str)
+    succeeded = Signal(object, float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        meter: Meter,
+        port: str,
+    ) -> None:
+        super().__init__()
+        self._meter = meter
+        self._port = port
+
+    def run(self) -> None:
+        started_at = time.monotonic()
+
+        try:
+            result = verify_hls_state_after_reset_failure(
+                meter=self._meter,
+                port=self._port,
+                progress=self.progress.emit,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(
+                result,
+                elapsed_seconds,
+            )
+        finally:
+            self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """Главное рабочее окно оператора."""
 
@@ -203,6 +258,8 @@ class MainWindow(QMainWindow):
         self._hls_worker: HlsPersonalizationWorker | None = None
         self._reset_thread: QThread | None = None
         self._reset_worker: HlsFactoryResetWorker | None = None
+        self._recovery_thread: QThread | None = None
+        self._recovery_worker: HlsResetRecoveryWorker | None = None
         self._operation_started_at: float | None = None
         self._operation_title = ""
         self._operation_indicator_on = True
@@ -343,16 +400,43 @@ class MainWindow(QMainWindow):
         self.reset_button.setObjectName("secondaryButton")
         self.reset_button.setEnabled(False)
         self.reset_button.setToolTip(
-            "Возвращает ПУ к заводскому HLS, проверяет вход "
-            "и отзывает активный HLS в реестре."
+            "Возвращает счётчик к заводскому HLS, проверяет "
+            "вход и отзывает активный HLS в реестре."
         )
         self.reset_button.clicked.connect(
             self._start_factory_hls_reset
         )
 
+        self.recovery_button = QPushButton(
+            "Проверить HLS"
+        )
+        self.recovery_button.setObjectName("secondaryButton")
+        self.recovery_button.setEnabled(False)
+        self.recovery_button.setToolTip(
+            "Без записи в счётчик проверяет, действует ли "
+            "заводской или персональный HLS после сбоя."
+        )
+        self.recovery_button.clicked.connect(
+            self._start_hls_state_recovery
+        )
+
+        self.export_button = QPushButton(
+            "Подготовить выгрузку"
+        )
+        self.export_button.setObjectName("secondaryButton")
+        self.export_button.setToolTip(
+            "Показывает подтверждённые HLS, которые ещё "
+            "не были включены в Excel-выгрузку."
+        )
+        self.export_button.clicked.connect(
+            self._open_export_preparation
+        )
+
         buttons_layout.addWidget(self.read_button)
         buttons_layout.addWidget(self.write_button)
         buttons_layout.addWidget(self.reset_button)
+        buttons_layout.addWidget(self.recovery_button)
+        buttons_layout.addWidget(self.export_button)
         buttons_layout.addStretch()
 
         self.system_status_label = QLabel(
@@ -633,6 +717,83 @@ class MainWindow(QMainWindow):
             )
             self.operations_list.addItem(item)
 
+    def _open_export_preparation(self) -> None:
+        """Открывает просмотр HLS, готовых к новой выгрузке."""
+        if (
+            self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+            or self._recovery_thread is not None
+        ):
+            return
+
+        try:
+            preview_items = prepare_export_preview()
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Не удалось подготовить выгрузку",
+                str(error),
+            )
+            return
+
+        if not preview_items:
+            QMessageBox.information(
+                self,
+                "Нет данных для выгрузки",
+                "Нет подтверждённых HLS, которые ещё не были "
+                "включены в экспортную партию.",
+            )
+            return
+
+        dialog = ExportPreparationDialog(
+            preview_items,
+            self,
+        )
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.export_button.setEnabled(False)
+        QApplication.setOverrideCursor(
+            Qt.CursorShape.WaitCursor
+        )
+
+        try:
+            batch, file_path = create_excel_export_from_preview(
+                preview_items=preview_items,
+                customer_name=dialog.customer_name,
+                order_number=dialog.order_number,
+            )
+        except ValueError as error:
+            QMessageBox.warning(
+                self,
+                "Выгрузка не создана",
+                str(error),
+            )
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Ошибка создания Excel-файла",
+                str(error),
+            )
+        else:
+            self._refresh_operations()
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Excel-выгрузка создана"
+            )
+
+            QMessageBox.information(
+                self,
+                "Excel-файл создан",
+                f"Партия {batch.number} сформирована.\n\n"
+                f"Строк: {batch.row_count}\n"
+                f"Файл: {file_path}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.export_button.setEnabled(True)
+
     def _read_meter_number(self) -> None:
         """Запускает чтение номера ПУ в фоновом потоке."""
         selected_port = str(
@@ -649,12 +810,15 @@ class MainWindow(QMainWindow):
             self._read_thread is not None
             or self._hls_thread is not None
             or self._reset_thread is not None
+            or self._recovery_thread is not None            
         ):
             return
 
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
         self._begin_operation(
             "Чтение счётчика",
             f"Подключение к оптической головке {selected_port}...",
@@ -689,8 +853,10 @@ class MainWindow(QMainWindow):
         serial_number: str,
         elapsed_seconds: float,
     ) -> None:
-        """Регистрирует успешно считанный ПУ и обновляет окно."""
-        meter, was_created = self.registry.get_or_create(serial_number)
+        """Регистрирует успешно считанный счётчик и обновляет окно."""
+        meter, was_created = self.registry.get_or_create(
+            serial_number
+        )
         self._finish_operation()
         self.current_meter = meter
         self.serial_label.setText(
@@ -703,33 +869,37 @@ class MainWindow(QMainWindow):
             MeterStatus.RESET,
         }:
             if was_created:
-                self._set_meter_result(
-                    f"ПУ считан за {elapsed_seconds:.1f} с и внесён "
-                    "в реестр. Доступно формирование нового HLS.",
-                    "success",
+                text = (
+                    f"Счётчик считан за {elapsed_seconds:.1f} с "
+                    "и внесён в реестр. Доступно формирование "
+                    "нового HLS."
                 )
             else:
-                self._set_meter_result(
-                    f"ПУ считан за {elapsed_seconds:.1f} с и уже есть "
-                    "в реестре. Доступно формирование нового HLS.",
-                    "success",
+                text = (
+                    f"Счётчик считан за {elapsed_seconds:.1f} с "
+                    "и уже есть в реестре. Доступно формирование "
+                    "нового HLS."
                 )
 
+            self._set_meter_result(text, "success")
             self.system_status_label.setText(
-                "Реестр: SQL Server · ПУ считан"
+                "Реестр: SQL Server · Счётчик считан"
             )
             self.write_button.setEnabled(True)
             self.reset_button.setEnabled(False)
+            self.recovery_button.setEnabled(False)
             return
 
         if meter.status == MeterStatus.OPERATION_UNCONFIRMED:
             self._set_meter_result(
-                "Новый HLS сформирован, но запись в ПУ не подтверждена. "
-                "Повторное формирование заблокировано.",
+                "Новый HLS сформирован, но запись в счётчик "
+                "не подтверждена. Повторное формирование "
+                "заблокировано.",
                 "error",
             )
             self.write_button.setEnabled(False)
             self.reset_button.setEnabled(False)
+            self.recovery_button.setEnabled(False)
             return
 
         if meter.status == MeterStatus.PERSONALIZED:
@@ -743,14 +913,31 @@ class MainWindow(QMainWindow):
             )
             self.write_button.setEnabled(False)
             self.reset_button.setEnabled(True)
+            self.recovery_button.setEnabled(False)
+            return
+
+        if meter.status == MeterStatus.HLS_STATE_UNKNOWN:
+            self._set_meter_result(
+                "Состояние HLS не подтверждено после сбоя. "
+                "Запись и сброс заблокированы до проверки.",
+                "error",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Требуется проверка HLS"
+            )
+            self.write_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
+            self.recovery_button.setEnabled(True)
             return
 
         self._set_meter_result(
-            "Текущий статус ПУ не позволяет записать новый HLS.",
+            "Текущий статус счётчика не позволяет "
+            "записать новый HLS.",
             "neutral",
         )
         self.write_button.setEnabled(False)
-        self.reset_button.setEnabled(True)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
 
     def _handle_read_failure(self, error_text: str) -> None:
         """Показывает безопасное сообщение об ошибке чтения."""
@@ -776,6 +963,7 @@ class MainWindow(QMainWindow):
         self._read_thread = None
         self._read_worker = None
         self.read_button.setEnabled(True)
+        self.export_button.setEnabled(True)
 
     def _start_hls_personalization(self) -> None:
         """Запрашивает подтверждение и запускает запись HLS."""
@@ -784,6 +972,7 @@ class MainWindow(QMainWindow):
             or self._read_thread is not None
             or self._hls_thread is not None
             or self._reset_thread is not None
+            or self._recovery_thread is not None
         ):
             return
 
@@ -834,6 +1023,8 @@ class MainWindow(QMainWindow):
 
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
         self.meter_port_combo.setEnabled(False)
         self._begin_operation(
             "Запись нового HLS",
@@ -923,6 +1114,145 @@ class MainWindow(QMainWindow):
         self._hls_worker = None
         self.read_button.setEnabled(True)
         self.meter_port_combo.setEnabled(True)
+        self.export_button.setEnabled(True)
+
+    def _start_hls_state_recovery(self) -> None:
+        """Проверяет HLS после неподтверждённого сброса."""
+        if (
+            self.current_meter is None
+            or self.current_meter.status
+            != MeterStatus.HLS_STATE_UNKNOWN
+            or self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+            or self._recovery_thread is not None
+        ):
+            return
+
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
+        )
+
+        if not selected_port:
+            self._set_meter_result(
+                "Выберите COM-порт оптической головки.",
+                "error",
+            )
+            return
+
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(False)
+
+        self._begin_operation(
+            "Проверка состояния HLS",
+            "Проверка входа с заводским HLS...",
+        )
+        self.meter_status_label.setText(
+            "Проверка состояния HLS без записи в счётчик..."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Проверка состояния HLS"
+        )
+
+        thread = QThread(self)
+        worker = HlsResetRecoveryWorker(
+            self.current_meter,
+            selected_port,
+        )
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._show_hls_progress)
+        worker.succeeded.connect(
+            self._apply_hls_state_recovery
+        )
+        worker.failed.connect(
+            self._handle_hls_state_recovery_failure
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._finish_hls_state_recovery
+        )
+
+        self._recovery_thread = thread
+        self._recovery_worker = worker
+        thread.start()
+
+    def _apply_hls_state_recovery(
+        self,
+        result,
+        elapsed_seconds: float,
+    ) -> None:
+        """Показывает подтверждённое состояние HLS."""
+        self._finish_operation()
+        self._refresh_operations()
+        self.serial_label.setText(
+            f"Серийный номер: {result.serial_number}"
+        )
+
+        if result.factory_hls_confirmed:
+            self._set_meter_result(
+                f"Заводской HLS подтверждён за "
+                f"{elapsed_seconds:.1f} с. Сброс состоялся.",
+                "success",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · HLS сброшен"
+            )
+            self.write_button.setEnabled(True)
+            self.reset_button.setEnabled(False)
+        else:
+            self._set_meter_result(
+                f"Персональный HLS подтверждён за "
+                f"{elapsed_seconds:.1f} с. Сброс не состоялся.",
+                "success",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · HLS активен"
+            )
+            self.write_button.setEnabled(False)
+            self.reset_button.setEnabled(True)
+
+        self.recovery_button.setEnabled(False)
+
+    def _handle_hls_state_recovery_failure(
+        self,
+        error_text: str,
+    ) -> None:
+        """Оставляет счётчик заблокированным при неясном результате."""
+        self._finish_operation()
+        self._set_meter_result(
+            "Не удалось подтвердить состояние HLS. "
+            "Повторные записи остаются заблокированными.",
+            "error",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Требуется проверка HLS"
+        )
+
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(True)
+
+        QMessageBox.warning(
+            self,
+            "Состояние HLS не подтверждено",
+            error_text,
+        )
+
+    def _finish_hls_state_recovery(self) -> None:
+        """Возвращает интерфейс после проверки HLS."""
+        self._recovery_thread = None
+        self._recovery_worker = None
+        self.read_button.setEnabled(True)
+        self.meter_port_combo.setEnabled(True)
+        self.export_button.setEnabled(True)
 
     def _start_factory_hls_reset(self) -> None:
         """Запрашивает подтверждение и запускает физический сброс."""
@@ -933,6 +1263,7 @@ class MainWindow(QMainWindow):
             or self._read_thread is not None
             or self._hls_thread is not None
             or self._reset_thread is not None
+            or self._recovery_thread is not None
         ):
             return
 
@@ -975,6 +1306,8 @@ class MainWindow(QMainWindow):
         self.read_button.setEnabled(False)
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
         self.meter_port_combo.setEnabled(False)
         self._begin_operation(
             "Сброс HLS",
@@ -1034,18 +1367,47 @@ class MainWindow(QMainWindow):
         self,
         error_text: str,
     ) -> None:
-        """Блокирует действия при неподтверждённом сбросе."""
-        self._set_meter_result(
-            "Сброс HLS не подтверждён. Повторные действия "
-            "в текущем окне заблокированы.",
-            "error",
-        )
-        self.system_status_label.setText(
-            "Реестр: SQL Server · Требуется проверка ПУ"
-        )
+        """Блокирует действия после неподтверждённого сброса."""
+        recovery_available = False
+
+        if self.current_meter is not None:
+            try:
+                self.hls_registry.mark_reset_unconfirmed(
+                    self.current_meter
+                )
+            except Exception as registry_error:
+                error_text = (
+                    f"{error_text}\n\n"
+                    "Не удалось зафиксировать состояние в реестре: "
+                    f"{registry_error}"
+                )
+            else:
+                recovery_available = True
+
         self._finish_operation()
+
+        if recovery_available:
+            self._set_meter_result(
+                "Сброс HLS не подтверждён. Доступна проверка "
+                "состояния без записи в счётчик.",
+                "error",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Требуется проверка HLS"
+            )
+        else:
+            self._set_meter_result(
+                "Сброс HLS не подтверждён. Повторные действия "
+                "заблокированы до ручной проверки.",
+                "error",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Требуется ручная проверка"
+            )
+
         self.write_button.setEnabled(False)
         self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(recovery_available)
 
         QMessageBox.warning(
             self,
@@ -1059,6 +1421,7 @@ class MainWindow(QMainWindow):
         self._reset_worker = None
         self.read_button.setEnabled(True)
         self.meter_port_combo.setEnabled(True)
+        self.export_button.setEnabled(True)
 
 
 def apply_application_style(app: QApplication) -> None:

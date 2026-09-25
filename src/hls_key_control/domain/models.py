@@ -96,6 +96,8 @@ class ExportBatch:
     created_at: datetime
     created_by: str
     row_count: int
+    customer_name: str = "Не указано"
+    order_number: str = "Не указано"
     file_name: str | None = None
     file_sha256: str | None = None
     completed_at: datetime | None = None
@@ -110,3 +112,13 @@ class ExportBatchItem:
     hls_key_id: UUID
     serial_number: str
     personalized_at: datetime    
+
+
+@dataclass(slots=True)
+class ExportCandidate:
+    """Подтверждённый HLS, доступный для подготовки выгрузки."""
+
+    meter_id: UUID
+    hls_key_id: UUID
+    serial_number: str
+    personalized_at: datetime

@@ -9,15 +9,319 @@ from hls_key_control.domain.models import (
     ExportBatch,
     ExportBatchItem,
     ExportBatchStatus,
+    ExportCandidate,
     HlsKeyStatus,
     MeterStatus,
     OperationType,
 )
+
 from hls_key_control.infrastructure.sql_server import open_connection
 
 
 class SqlExportBatchRepository:
     """Фиксирует неизменяемый состав Excel-партий в SQL Server."""
+
+    def list_export_candidates(
+        self,
+    ) -> list[tuple[ExportCandidate, bytes]]:
+        """Возвращает HLS, доступные для новой выгрузки.
+
+        Метод только читает БД: не создаёт партию и не резервирует
+        ключи для экспорта.
+        """
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            rows = cursor.execute(
+                """
+                SELECT
+                    m.meter_id,
+                    m.serial_number,
+                    h.hls_key_id,
+                    COALESCE(
+                        activated.created_at,
+                        h.created_at
+                    ) AS personalized_at,
+                    h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                OUTER APPLY (
+                    SELECT TOP (1)
+                        o.created_at
+                    FROM dbo.Operations AS o
+                    WHERE
+                        o.meter_id = m.meter_id
+                        AND o.operation_type = ?
+                    ORDER BY o.created_at DESC
+                ) AS activated
+                WHERE
+                    m.status = ?
+                    AND h.status = ?
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM dbo.ExportBatchItems AS item
+                        WHERE item.hls_key_id = h.hls_key_id
+                    )
+                ORDER BY m.serial_number;
+                """,
+                OperationType.HLS_ACTIVATED.value,
+                MeterStatus.PERSONALIZED.value,
+                HlsKeyStatus.ACTIVE.value,
+            ).fetchall()
+
+            result: list[tuple[ExportCandidate, bytes]] = []
+
+            for row in rows:
+                if row.encrypted_value is None:
+                    raise RuntimeError(
+                        "Для подготовленной выгрузки отсутствует "
+                        "защищённое значение HLS."
+                    )
+
+                result.append(
+                    (
+                        ExportCandidate(
+                            meter_id=UUID(str(row.meter_id)),
+                            hls_key_id=UUID(str(row.hls_key_id)),
+                            serial_number=str(row.serial_number),
+                            personalized_at=row.personalized_at,
+                        ),
+                        bytes(row.encrypted_value),
+                    )
+                )
+
+            return result
+        finally:
+            connection.close()
+
+    def create_batch_for_candidates(
+        self,
+        created_by: str,
+        customer_name: str,
+        order_number: str,
+        hls_key_ids: list[UUID],
+    ) -> ExportBatch:
+        """Создаёт партию из точного набора HLS из окна подготовки."""
+        customer_name = customer_name.strip()
+        order_number = order_number.strip()
+
+        if not customer_name:
+            raise ValueError("Укажите заказчика для экспортной партии.")
+
+        if not order_number:
+            raise ValueError("Укажите номер заказа для экспортной партии.")
+
+        if len(customer_name) > 160:
+            raise ValueError(
+                "Название заказчика не должно быть длиннее 160 символов."
+            )
+
+        if len(order_number) > 100:
+            raise ValueError(
+                "Номер заказа не должен быть длиннее 100 символов."
+            )
+
+        requested_ids = [
+            UUID(str(hls_key_id))
+            for hls_key_id in hls_key_ids
+        ]
+
+        if not requested_ids:
+            raise ValueError(
+                "Нет подтверждённых HLS для новой выгрузки."
+            )
+
+        if len(set(requested_ids)) != len(requested_ids):
+            raise ValueError(
+                "В состав выгрузки попали повторяющиеся HLS."
+            )
+
+        placeholders = ", ".join(
+            "?"
+            for _ in requested_ids
+        )
+
+        placeholders = ", ".join("?" for _ in requested_ids)
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+            prefix = datetime.now().astimezone().strftime(
+                "HLS-%Y%m%d"
+            )
+
+            last_batch = cursor.execute(
+                """
+                SELECT TOP (1) batch_number
+                FROM dbo.ExportBatches WITH (
+                    UPDLOCK,
+                    SERIALIZABLE
+                )
+                WHERE batch_number LIKE ?
+                ORDER BY batch_number DESC;
+                """,
+                f"{prefix}-%",
+            ).fetchone()
+
+            sequence = 1
+
+            if last_batch is not None:
+                sequence = (
+                    int(
+                        str(last_batch.batch_number).rsplit(
+                            "-",
+                            1,
+                        )[1]
+                    )
+                    + 1
+                )
+
+            batch_number = f"{prefix}-{sequence:03d}"
+
+            rows = cursor.execute(
+                f"""
+                SELECT
+                    m.meter_id,
+                    m.serial_number,
+                    h.hls_key_id,
+                    COALESCE(
+                        activated.created_at,
+                        h.created_at
+                    ) AS personalized_at
+                FROM dbo.HlsKeys AS h WITH (
+                    UPDLOCK,
+                    SERIALIZABLE
+                )
+                INNER JOIN dbo.Meters AS m WITH (
+                    UPDLOCK,
+                    SERIALIZABLE
+                )
+                    ON m.current_hls_key_id = h.hls_key_id
+                OUTER APPLY (
+                    SELECT TOP (1)
+                        o.created_at
+                    FROM dbo.Operations AS o
+                    WHERE
+                        o.meter_id = m.meter_id
+                        AND o.operation_type = ?
+                    ORDER BY o.created_at DESC
+                ) AS activated
+                WHERE
+                    h.hls_key_id IN ({placeholders})
+                    AND m.status = ?
+                    AND h.status = ?
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM dbo.ExportBatchItems AS item
+                        WHERE item.hls_key_id = h.hls_key_id
+                    )
+                ORDER BY m.serial_number;
+                """,
+                OperationType.HLS_ACTIVATED.value,
+                *(str(hls_key_id) for hls_key_id in requested_ids),
+                MeterStatus.PERSONALIZED.value,
+                HlsKeyStatus.ACTIVE.value,
+            ).fetchall()
+
+            actual_ids = {
+                UUID(str(row.hls_key_id))
+                for row in rows
+            }
+
+            if (
+                len(rows) != len(requested_ids)
+                or actual_ids != set(requested_ids)
+            ):
+                raise ValueError(
+                    "Состав доступных HLS изменился. "
+                    "Обновите подготовку выгрузки."
+                )
+
+            batch_row = cursor.execute(
+                """
+                INSERT INTO dbo.ExportBatches (
+                    batch_number,
+                    created_by,
+                    customer_name,
+                    order_number
+                )
+                OUTPUT
+                    inserted.export_batch_id,
+                    inserted.batch_number,
+                    inserted.status,
+                    inserted.created_at,
+                    inserted.created_by,
+                    inserted.row_count,
+                    inserted.customer_name,
+                    inserted.order_number
+                VALUES (?, ?, ?, ?);
+                """,
+                batch_number,
+                created_by,
+                customer_name,
+                order_number,
+            ).fetchone()
+
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO dbo.ExportBatchItems (
+                        export_batch_id,
+                        meter_id,
+                        hls_key_id,
+                        serial_number,
+                        personalized_at
+                    )
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    str(batch_row.export_batch_id),
+                    str(row.meter_id),
+                    str(row.hls_key_id),
+                    row.serial_number,
+                    row.personalized_at,
+                )
+
+                self._record_operation(
+                    cursor,
+                    str(row.meter_id),
+                    OperationType.EXPORT_BATCH_CREATED,
+                    (
+                        "Счётчик включён в экспортную партию "
+                        f"{batch_row.batch_number}."
+                    ),
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.ExportBatches
+                SET row_count = ?
+                WHERE export_batch_id = ?;
+                """,
+                len(rows),
+                str(batch_row.export_batch_id),
+            )
+
+            connection.commit()
+
+            return ExportBatch(
+                id=UUID(str(batch_row.export_batch_id)),
+                number=str(batch_row.batch_number),
+                status=ExportBatchStatus(
+                    str(batch_row.status)
+                ),
+                created_at=batch_row.created_at,
+                created_by=str(batch_row.created_by),
+                row_count=len(rows),
+                customer_name=str(batch_row.customer_name),
+                order_number=str(batch_row.order_number),
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def create_next_batch(
         self,
