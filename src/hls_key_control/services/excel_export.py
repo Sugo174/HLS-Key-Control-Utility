@@ -20,6 +20,17 @@ from hls_key_control.services.export_preparation import (
     ExportPreviewItem,
 )
 
+BRAND_LOGO_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "assets"
+    / "emis-electra-logo.png"
+)
+
+BRAND_DARK_GREEN = "#007A5E"
+BRAND_MID_GREEN = "#009975"
+BRAND_DARK_GRAY = "#363630"
+BRAND_BORDER = "#9DE4C0"
+
 
 def create_excel_export_from_preview(
     preview_items: list[ExportPreviewItem],
@@ -212,24 +223,33 @@ def _write_batch_sheet(
     worksheet.hide_gridlines(2)
     worksheet.set_column("A:A", 28)
     worksheet.set_column("B:B", 42)
+    worksheet.set_column("C:C", 3)
+    worksheet.set_column("D:D", 20)
+    worksheet.set_tab_color(BRAND_DARK_GREEN)
+    worksheet.set_row(0, 42)
 
     title_format = workbook.add_format(
         {
             "bold": True,
             "font_size": 16,
-            "font_color": "#172033",
+            "font_color": BRAND_DARK_GREEN,
+            "valign": "vcenter",
         }
     )
     label_format = workbook.add_format(
         {
             "bold": True,
-            "bg_color": "#E9EDF3",
+            "font_color": "#FFFFFF",
+            "bg_color": BRAND_MID_GREEN,
             "border": 1,
+            "border_color": BRAND_BORDER,
+            "valign": "vcenter",
         }
     )
     value_format = workbook.add_format(
         {
             "border": 1,
+            "border_color": BRAND_BORDER,
             "align": "center",
             "valign": "vcenter",
         }
@@ -237,15 +257,32 @@ def _write_batch_sheet(
     date_format = workbook.add_format(
         {
             "border": 1,
+            "border_color": BRAND_BORDER,
             "align": "center",
             "valign": "vcenter",
             "num_format": "dd.mm.yyyy hh:mm:ss",
+        }
+    )
+    note_format = workbook.add_format(
+        {
+            "font_color": BRAND_DARK_GRAY,
+            "italic": True,
         }
     )
     worksheet.write("A3", "Номер заказа", label_format)
     created_at = _to_local_time(batch.created_at)
 
     worksheet.write("A1", "Экспортная партия HLS", title_format)
+    worksheet.insert_image(
+        "B1",
+        str(BRAND_LOGO_PATH),
+        {
+            "x_scale": 0.105,
+            "y_scale": 0.105,
+            "x_offset": 4,
+            "y_offset": 1,
+        },
+    )
     worksheet.write_string(
         "B3",
         batch.order_number,
@@ -278,6 +315,7 @@ def _write_batch_sheet(
     worksheet.write(
         "A9",
         "Файл содержит конфиденциальные HLS-пароли.",
+        note_format,
     )
 
 
@@ -291,6 +329,7 @@ def _write_meters_sheet(
     worksheet.hide_gridlines(2)
     worksheet.freeze_panes(1, 0)
     worksheet.autofilter(0, 0, len(items), 4)
+    worksheet.set_tab_color(BRAND_MID_GREEN)
 
     worksheet.set_column("A:A", 8)
     worksheet.set_column("B:B", 22)
@@ -302,21 +341,29 @@ def _write_meters_sheet(
         {
             "bold": True,
             "font_color": "#FFFFFF",
-            "bg_color": "#2563EB",
+            "bg_color": BRAND_MID_GREEN,
             "border": 1,
+            "border_color": BRAND_BORDER,
             "align": "center",
+            "valign": "vcenter",
         }
     )
-    text_format = workbook.add_format(
+    centered_text_format = workbook.add_format(
         {
             "border": 1,
+            "border_color": BRAND_BORDER,
             "num_format": "@",
+            "align": "center",
+            "valign": "vcenter",
         }
     )
     date_format = workbook.add_format(
         {
             "border": 1,
+            "border_color": BRAND_BORDER,
             "num_format": "dd.mm.yyyy hh:mm:ss",
+            "align": "center",
+            "valign": "vcenter",
         }
     )
 
@@ -341,25 +388,25 @@ def _write_meters_sheet(
             row_number,
             0,
             row_number,
-            text_format,
+            centered_text_format,
         )
         worksheet.write_string(
             row_number,
             1,
             batch.order_number,
-            text_format,
+            centered_text_format,
         )
         worksheet.write_string(
             row_number,
             2,
             item.serial_number,
-            text_format,
+            centered_text_format,
         )
         worksheet.write_string(
             row_number,
             3,
             hls_password,
-            text_format,
+            centered_text_format,
         )
         worksheet.write_datetime(
             row_number,
