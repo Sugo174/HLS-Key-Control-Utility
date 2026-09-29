@@ -3,7 +3,7 @@
 import sys
 import time
 
-from datetime import UTC
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -33,6 +33,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QLineEdit,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
 )
 
 from hls_key_control.domain.models import (
@@ -663,8 +666,25 @@ class MainWindow(QMainWindow):
         journal_layout.setContentsMargins(22, 18, 22, 18)
         journal_layout.setSpacing(10)
 
+        journal_header_layout = QHBoxLayout()
+        journal_header_layout.setContentsMargins(0, 0, 0, 0)
+
         journal_title = QLabel("Последние операции")
         journal_title.setObjectName("cardTitle")
+
+        self.history_button = QPushButton("История HLS")
+        self.history_button.setObjectName("secondaryButton")
+        self.history_button.setToolTip(
+            "Ищет в реестре все HLS по серийному номеру счётчика."
+        )
+        self.history_button.hide()
+        self.history_button.clicked.connect(
+            self._open_hls_history
+        )
+
+        journal_header_layout.addWidget(journal_title)
+        journal_header_layout.addStretch()
+        journal_header_layout.addWidget(self.history_button)
 
         self.journal_empty_label = QLabel("Операций пока нет.")
         self.journal_empty_label.setObjectName("meterStatus")
@@ -677,7 +697,7 @@ class MainWindow(QMainWindow):
         )
         self.operations_list.hide()
 
-        journal_layout.addWidget(journal_title)
+        journal_layout.addLayout(journal_header_layout)
         journal_layout.addWidget(self.journal_empty_label)
         journal_layout.addWidget(self.operations_list)
 
@@ -731,6 +751,7 @@ class MainWindow(QMainWindow):
             self.write_button.setText("Записать новый HLS")
             self.export_button.setText("Подготовить выгрузку")
             self.export_button.setEnabled(True)
+            self.history_button.hide()
             self.system_status_label.setText(
                 "Реестр: SQL Server · Готово к персонализации"
             )
@@ -744,6 +765,7 @@ class MainWindow(QMainWindow):
             self.write_button.setText("Записать сервисный HLS")
             self.export_button.setText("Прочитать HLS")
             self.export_button.setEnabled(False)
+            self.history_button.show()
             self.system_status_label.setText(
                 "Реестр: SQL Server · Режим обслуживания"
             )
@@ -1035,6 +1057,314 @@ class MainWindow(QMainWindow):
             return
 
         self._open_export_preparation()
+
+    def _open_hls_history(self) -> None:
+        """Показывает историю HLS по серийному номеру из реестра."""
+        dialog = QDialog(self)
+        dialog.setObjectName("confirmationDialog")
+        dialog.setWindowTitle("История HLS")
+        dialog.setMinimumWidth(900)
+
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(24, 22, 24, 22)
+        dialog_layout.setSpacing(14)
+
+        title = QLabel("История HLS счётчика")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            "Выберите поиск по серийному номеру или по HLS. "
+            "Реестр покажет полную историю найденного счётчика."
+        )
+        description.setWordWrap(True)
+
+        search_layout = QHBoxLayout()
+        search_layout.setSpacing(10)
+
+        search_type_combo = QComboBox()
+        search_type_combo.addItem(
+            "По серийному номеру",
+            "serial_number",
+        )
+        search_type_combo.addItem("По HLS", "hls_password")
+
+        serial_input = QLineEdit()
+        serial_input.setPlaceholderText("Серийный номер счётчика")
+
+        if self.current_meter is not None:
+            serial_input.setText(
+                self.current_meter.serial_number
+            )
+
+        search_button = QPushButton("Найти")
+        search_button.setObjectName("primaryButton")
+        search_button.setDefault(True)
+        search_layout.addWidget(search_type_combo)
+        search_layout.addWidget(serial_input, stretch=1)
+        search_layout.addWidget(search_button)
+
+        result_label = QLabel()
+        result_label.setObjectName("meterStatus")
+
+        history_table = QTableWidget()
+        history_table.setColumnCount(5)
+        history_table.setHorizontalHeaderLabels(
+            [
+                "Создан",
+                "HLS",
+                "Назначение",
+                "Статус",
+                "Отозван",
+            ]
+        )
+        history_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        history_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        history_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        history_table.setMinimumHeight(260)
+        history_table.setStyleSheet(
+            """
+            QTableWidget::item:selected {
+                background-color: #009975;
+                color: white;
+            }
+
+            QTableWidget::item:selected:!active {
+                background-color: #009975;
+                color: white;
+            }
+            """
+        )
+        history_table.verticalHeader().setVisible(False)
+
+        table_header = history_table.horizontalHeader()
+        table_header.setSectionResizeMode(
+            0,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        table_header.setSectionResizeMode(
+            1,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        table_header.setSectionResizeMode(
+            2,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        table_header.setSectionResizeMode(
+            3,
+            QHeaderView.ResizeMode.ResizeToContents,
+        )
+        table_header.setStretchLastSection(True)
+
+        history_records = []
+
+        def format_datetime(value: datetime | None) -> str:
+            if value is None:
+                return "—"
+
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+
+            return value.astimezone().strftime(
+                "%d.%m.%Y %H:%M:%S"
+            )
+
+        def find_history() -> None:
+            nonlocal history_records
+
+            search_value = serial_input.text().strip()
+            search_type = search_type_combo.currentData()
+            title.setText("История HLS счётчика")
+
+            try:
+                if search_type == "hls_password":
+                    history_records = (
+                        self.hls_registry.get_hls_history_by_password(
+                            search_value
+                        )
+                    )
+                else:
+                    history_records = (
+                        self.hls_registry.get_hls_history_by_serial_number(
+                            search_value
+                        )
+                    )
+            except ValueError as error:
+                result_label.setText(str(error))
+                history_table.setRowCount(0)
+                return
+            except Exception as error:
+                result_label.setText(
+                    f"Не удалось получить историю HLS: {error}"
+                )
+                history_table.setRowCount(0)
+                return
+
+            history_table.setRowCount(len(history_records))
+
+            if not history_records:
+                result_label.setText(
+                    "Для этого серийного номера HLS в реестре не найдено."
+                )
+                return
+
+            purpose_names = {
+                "personalization": "Персонализация",
+                "service": "Обслуживание",
+            }
+            status_names = {
+                "reserved": "Зарезервирован",
+                "active": "Активен",
+                "retired": "Отозван",
+                "unconfirmed": "Не подтверждён",
+                "failed": "Неуспешный",
+            }
+
+            for row_number, record in enumerate(history_records):
+                purpose_text = purpose_names.get(
+                    str(record.purpose),
+                    str(record.purpose),
+                )
+                status_text = status_names.get(
+                    str(record.status),
+                    str(record.status),
+                )
+
+                history_table.setItem(
+                    row_number,
+                    0,
+                    QTableWidgetItem(
+                        format_datetime(record.created_at)
+                    ),
+                )
+                history_table.setItem(
+                    row_number,
+                    1,
+                    QTableWidgetItem(
+                        record.hls_password or "Не сохранён"
+                    ),
+                )
+                history_table.setItem(
+                    row_number,
+                    2,
+                    QTableWidgetItem(purpose_text),
+                )
+                history_table.setItem(
+                    row_number,
+                    3,
+                    QTableWidgetItem(status_text),
+                )
+                history_table.setItem(
+                    row_number,
+                    4,
+                    QTableWidgetItem(
+                        format_datetime(record.retired_at)
+                    ),
+                )
+
+            selected_row_number = 0
+
+            if search_type == "hls_password":
+                for row_number, record in enumerate(history_records):
+                    if record.hls_password == search_value:
+                        selected_row_number = row_number
+                        break
+
+            meter_serial_number = history_records[
+                0
+            ].meter_serial_number
+
+            history_table.selectRow(selected_row_number)
+            title.setText(
+                "История HLS счётчика "
+                f"№{meter_serial_number}"
+            )
+
+            if search_type == "hls_password":
+                result_label.setText(
+                    f"Найден счётчик №{meter_serial_number}. "
+                    "Искомый HLS выделен в таблице. "
+                    f"Всего записей: {len(history_records)}."
+                )
+            else:
+                result_label.setText(
+                    f"Счётчик №{meter_serial_number}. "
+                    f"Найдено записей HLS: {len(history_records)}."
+                )
+
+        def copy_selected_hls() -> None:
+            row_number = history_table.currentRow()
+
+            if row_number < 0:
+                result_label.setText(
+                    "Выберите строку с HLS для копирования."
+                )
+                return
+
+            hls_password = history_records[
+                row_number
+            ].hls_password
+
+            if hls_password is None:
+                result_label.setText(
+                    "В этой записи HLS-пароль не сохранён."
+                )
+                return
+
+            QApplication.clipboard().setText(hls_password)
+            result_label.setText("HLS скопирован в буфер обмена.")
+
+        def update_search_mode() -> None:
+            if search_type_combo.currentData() == "hls_password":
+                serial_input.setPlaceholderText("16-значный HLS-пароль")
+            else:
+                serial_input.setPlaceholderText(
+                    "Серийный номер счётчика"
+                )
+
+            serial_input.clear()
+            result_label.clear()
+            history_table.setRowCount(0)
+
+        search_type_combo.currentIndexChanged.connect(
+            update_search_mode
+        )
+
+        serial_input.returnPressed.connect(find_history)
+        search_button.clicked.connect(find_history)
+
+        buttons_layout = QHBoxLayout()
+
+        copy_button = QPushButton("Скопировать HLS")
+        copy_button.setObjectName("secondaryButton")
+        copy_button.clicked.connect(copy_selected_hls)
+
+        close_button = QPushButton("Закрыть")
+        close_button.setObjectName("primaryButton")
+        close_button.setDefault(False)
+        close_button.setAutoDefault(False)
+        close_button.clicked.connect(dialog.accept)
+
+        buttons_layout.addWidget(copy_button)
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(close_button)
+
+        dialog_layout.addWidget(title)
+        dialog_layout.addWidget(description)
+        dialog_layout.addLayout(search_layout)
+        dialog_layout.addWidget(result_label)
+        dialog_layout.addWidget(history_table)
+        dialog_layout.addLayout(buttons_layout)
+
+        if serial_input.text():
+            find_history()
+
+        dialog.exec()
 
     def _show_service_hls(self) -> None:
         """Показывает только подтверждённый сервисный HLS."""

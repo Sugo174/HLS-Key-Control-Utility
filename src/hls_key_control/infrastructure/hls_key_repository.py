@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from hls_key_control.domain.models import (
+    HlsHistoryRecord,
     HlsKey,
     HlsKeyStatus,
     HlsKeyPurpose,
@@ -10,6 +11,7 @@ from hls_key_control.domain.models import (
     MeterStatus,
     OperationType,
 )
+
 from hls_key_control.infrastructure.sql_server import open_connection
 from hls_key_control.services.hls_generator import generate_hls_password
 from hls_key_control.services.hls_protection import HlsProtector
@@ -331,6 +333,101 @@ class SqlHlsKeyRepository:
         finally:
             connection.close()
 
+    def get_hls_history_by_password(
+        self,
+        hls_password: str,
+    ) -> list[HlsHistoryRecord]:
+        """Находит счётчик по HLS и возвращает всю его историю."""
+        normalized_hls_password = hls_password.strip()
+
+        if not normalized_hls_password:
+            raise ValueError("Укажите HLS-пароль.")
+
+        fingerprint = self._protector.create_fingerprint(
+            normalized_hls_password
+        )
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT m.serial_number
+                FROM dbo.HlsKeys AS h
+                INNER JOIN dbo.Meters AS m
+                    ON m.meter_id = h.meter_id
+                WHERE h.fingerprint = ?;
+                """,
+                fingerprint,
+            ).fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
+            return []
+
+        return self.get_hls_history_by_serial_number(
+            str(row.serial_number)
+        )
+
+    def get_hls_history_by_serial_number(
+        self,
+        meter_serial_number: str,
+    ) -> list[HlsHistoryRecord]:
+        """Возвращает полную историю HLS для указанного счётчика."""
+        normalized_serial_number = meter_serial_number.strip()
+
+        if not normalized_serial_number:
+            raise ValueError("Укажите серийный номер счётчика.")
+
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            rows = cursor.execute(
+                """
+                SELECT
+                    m.serial_number,
+                    h.status,
+                    h.purpose,
+                    h.encrypted_value,
+                    h.created_at,
+                    h.retired_at
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.meter_id = m.meter_id
+                WHERE m.serial_number = ?
+                ORDER BY h.created_at DESC;
+                """,
+                normalized_serial_number,
+            ).fetchall()
+
+            history: list[HlsHistoryRecord] = []
+
+            for row in rows:
+                hls_password = None
+
+                if row.encrypted_value is not None:
+                    hls_password = self._protector.decrypt(
+                        bytes(row.encrypted_value)
+                    )
+
+                history.append(
+                    HlsHistoryRecord(
+                        meter_serial_number=str(row.serial_number),
+                        hls_password=hls_password,
+                        status=HlsKeyStatus(str(row.status)),
+                        purpose=HlsKeyPurpose(str(row.purpose)),
+                        created_at=row.created_at,
+                        retired_at=row.retired_at,
+                    )
+                )
+
+            return history
+        finally:
+            connection.close()
 
     def get_unconfirmed_service_hls_password(
         self,

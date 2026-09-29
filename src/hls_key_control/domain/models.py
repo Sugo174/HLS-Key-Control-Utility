@@ -82,6 +82,18 @@ class HlsKey:
 
 
 @dataclass(slots=True)
+class HlsHistoryRecord:
+    """Одна запись истории HLS для сервисного просмотра."""
+
+    meter_serial_number: str
+    hls_password: str | None
+    status: HlsKeyStatus
+    purpose: HlsKeyPurpose
+    created_at: datetime
+    retired_at: datetime | None
+
+
+@dataclass(slots=True)
 class Operation:
     """Неизменяемая запись журнала действий с ПУ."""
 
