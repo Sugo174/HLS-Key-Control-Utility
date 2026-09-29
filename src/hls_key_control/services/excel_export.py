@@ -19,12 +19,13 @@ from hls_key_control.services.hls_protection import HlsProtector
 from hls_key_control.services.export_preparation import (
     ExportPreviewItem,
 )
-from hls_key_control.runtime_paths import get_application_data_directory
+from hls_key_control.runtime_paths import (
+    get_application_data_directory,
+    get_assets_directory,
+)
 
 BRAND_LOGO_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "assets"
-    / "emis-electra-logo.png"
+    get_assets_directory() / "emis-electra-logo.png"
 )
 
 BRAND_DARK_GREEN = "#007A5E"

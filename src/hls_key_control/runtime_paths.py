@@ -16,3 +16,11 @@ def get_application_directory() -> Path:
 def get_application_data_directory() -> Path:
     """Возвращает папку для локальных файлов приложения."""
     return get_application_directory()
+
+
+def get_assets_directory() -> Path:
+    """Возвращает папку с фирменными ресурсами приложения."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "assets"
+
+    return Path(__file__).resolve().parent / "assets"

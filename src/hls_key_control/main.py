@@ -5,7 +5,6 @@ import time
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
 
 from PySide6.QtCore import (
     QObject,
@@ -95,8 +94,10 @@ from hls_key_control.services.application_log import (
     write_application_log,
 )
 
+from hls_key_control.runtime_paths import get_assets_directory
+
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
-ASSETS_DIRECTORY = Path(__file__).resolve().parent / "assets"
+ASSETS_DIRECTORY = get_assets_directory()
 APP_ICON_PATH = ASSETS_DIRECTORY / "emis-electra-app.png"
 BRAND_LOGO_PATH = ASSETS_DIRECTORY / "emis-electra-logo.png"
 
