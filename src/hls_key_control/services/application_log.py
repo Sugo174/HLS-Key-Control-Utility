@@ -1,14 +1,14 @@
 """Простой локальный журнал итоговых действий приложения."""
 
 from datetime import datetime
-from pathlib import Path
+from hls_key_control.runtime_paths import get_application_data_directory
 
 
 def write_application_log(message: str) -> None:
     """Добавляет строку в локальный журнал текущего дня."""
     try:
         current_time = datetime.now().astimezone()
-        log_directory = Path.cwd() / "logs"
+        log_directory = get_application_data_directory() / "logs"
         log_directory.mkdir(parents=True, exist_ok=True)
 
         log_path = log_directory / (

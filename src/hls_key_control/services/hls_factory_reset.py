@@ -20,6 +20,7 @@ from hls_key_control.services.hls_login_verification import (
 
 def reset_meter_to_factory_hls(
     port: str | None = None,
+    description: str | None = None,
 ) -> str:
     """Возвращает ПУ к заводскому HLS и подтверждает это входом."""
     factory_password = (
@@ -57,7 +58,10 @@ def reset_meter_to_factory_hls(
     if meter is None:
         raise RuntimeError("ПУ отсутствует в реестре SQL Server.")
 
-    SqlHlsKeyRepository().confirm_physical_reset(meter)
+    SqlHlsKeyRepository().confirm_physical_reset(
+        meter,
+        description=description,
+    )
 
     return serial_number
 

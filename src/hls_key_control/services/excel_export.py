@@ -19,6 +19,7 @@ from hls_key_control.services.hls_protection import HlsProtector
 from hls_key_control.services.export_preparation import (
     ExportPreviewItem,
 )
+from hls_key_control.runtime_paths import get_application_data_directory
 
 BRAND_LOGO_PATH = (
     Path(__file__).resolve().parent.parent
@@ -40,7 +41,7 @@ def create_excel_export_from_preview(
 ) -> tuple[ExportBatch, Path]:
     """Создаёт Excel из состава, показанного оператору."""
     if output_directory is None:
-        output_directory = Path.cwd() / "exports"
+        output_directory = get_application_data_directory() / "exports"
 
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +121,7 @@ def create_next_excel_export(
 ) -> tuple[ExportBatch, Path]:
     """Создаёт новую экспортную партию и Excel-файл."""
     if output_directory is None:
-        output_directory = Path.cwd() / "exports"
+        output_directory = get_application_data_directory() / "exports"
 
     output_directory.mkdir(parents=True, exist_ok=True)
 

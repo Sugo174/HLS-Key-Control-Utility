@@ -11,6 +11,7 @@ from hls_key_control.domain.models import (
     ExportBatchStatus,
     ExportCandidate,
     HlsKeyStatus,
+    HlsKeyPurpose,
     MeterStatus,
     OperationType,
 )
@@ -59,6 +60,7 @@ class SqlExportBatchRepository:
                 WHERE
                     m.status = ?
                     AND h.status = ?
+                    AND h.purpose = ?
                     AND NOT EXISTS (
                         SELECT 1
                         FROM dbo.ExportBatchItems AS item
@@ -69,6 +71,7 @@ class SqlExportBatchRepository:
                 OperationType.HLS_ACTIVATED.value,
                 MeterStatus.PERSONALIZED.value,
                 HlsKeyStatus.ACTIVE.value,
+                HlsKeyPurpose.PERSONALIZATION.value,
             ).fetchall()
 
             result: list[tuple[ExportCandidate, bytes]] = []
@@ -212,6 +215,7 @@ class SqlExportBatchRepository:
                     h.hls_key_id IN ({placeholders})
                     AND m.status = ?
                     AND h.status = ?
+                    AND h.purpose = ?
                     AND NOT EXISTS (
                         SELECT 1
                         FROM dbo.ExportBatchItems AS item
@@ -223,6 +227,7 @@ class SqlExportBatchRepository:
                 *(str(hls_key_id) for hls_key_id in requested_ids),
                 MeterStatus.PERSONALIZED.value,
                 HlsKeyStatus.ACTIVE.value,
+                HlsKeyPurpose.PERSONALIZATION.value
             ).fetchall()
 
             actual_ids = {
@@ -414,6 +419,7 @@ class SqlExportBatchRepository:
                 WHERE
                     m.status = ?
                     AND h.status = ?
+                    AND h.purpose = ?
                     AND NOT EXISTS (
                         SELECT 1
                         FROM dbo.ExportBatchItems AS item
@@ -424,6 +430,7 @@ class SqlExportBatchRepository:
                 OperationType.HLS_ACTIVATED.value,
                 MeterStatus.PERSONALIZED.value,
                 HlsKeyStatus.ACTIVE.value,
+                HlsKeyPurpose.PERSONALIZATION.value,
             ).fetchall()
 
             if not rows:

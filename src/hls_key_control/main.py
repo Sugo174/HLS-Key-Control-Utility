@@ -4,6 +4,7 @@ import sys
 import time
 
 from datetime import UTC
+from enum import StrEnum
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QComboBox,
     QDialog,
+    QLineEdit,
 )
 
 from hls_key_control.domain.models import (
@@ -61,6 +63,11 @@ from hls_key_control.services.hls_personalization import (
     personalize_meter_hls,
 )
 
+from hls_key_control.services.hls_service import (
+    verify_unconfirmed_service_hls,
+    write_service_hls,
+)
+
 from hls_key_control.services.hls_factory_reset import (
     reset_meter_to_factory_hls,
 )
@@ -89,6 +96,13 @@ TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 ASSETS_DIRECTORY = Path(__file__).resolve().parent / "assets"
 APP_ICON_PATH = ASSETS_DIRECTORY / "emis-electra-app.png"
 BRAND_LOGO_PATH = ASSETS_DIRECTORY / "emis-electra-logo.png"
+
+class WorkMode(StrEnum):
+    """Рабочие режимы HLS Key Control Utility."""
+
+    PERSONALIZATION = "personalization"
+    SERVICE = "service"
+
 
 class MeterReadWorker(QObject):
     """Выполняет физическое чтение ПУ вне потока интерфейса."""
@@ -189,6 +203,84 @@ class HlsPersonalizationWorker(QObject):
             self.finished.emit()
 
 
+class HlsServiceWriteWorker(QObject):
+    """Записывает сервисный HLS вне потока интерфейса."""
+
+    progress = Signal(str)
+    succeeded = Signal(str, float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        meter: Meter,
+        port: str,
+    ) -> None:
+        super().__init__()
+        self._meter = meter
+        self._port = port
+
+    def run(self) -> None:
+        """Записывает и подтверждает сервисный HLS."""
+        started_at = time.monotonic()
+
+        try:
+            serial_number = write_service_hls(
+                meter=self._meter,
+                port=self._port,
+                progress=self.progress.emit,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(
+                serial_number,
+                elapsed_seconds,
+            )
+        finally:
+            self.finished.emit()
+
+
+class HlsServiceRecoveryWorker(QObject):
+    """Проверяет неподтверждённый сервисный HLS вне потока интерфейса."""
+
+    progress = Signal(str)
+    succeeded = Signal(str, float)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        meter: Meter,
+        port: str,
+    ) -> None:
+        super().__init__()
+        self._meter = meter
+        self._port = port
+
+    def run(self) -> None:
+        """Проверяет сервисный HLS без повторной записи."""
+        started_at = time.monotonic()
+
+        try:
+            serial_number = verify_unconfirmed_service_hls(
+                meter=self._meter,
+                port=self._port,
+                progress=self.progress.emit,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            elapsed_seconds = time.monotonic() - started_at
+            self.succeeded.emit(
+                serial_number,
+                elapsed_seconds,
+            )
+        finally:
+            self.finished.emit()
+
+
 class HlsFactoryResetWorker(QObject):
     """Выполняет физический сброс HLS вне потока интерфейса."""
 
@@ -266,6 +358,7 @@ class MainWindow(QMainWindow):
         self.registry = SqlMeterRepository()
         self.hls_registry = SqlHlsKeyRepository()
         self.current_meter: Meter | None = None
+        self._work_mode = WorkMode.PERSONALIZATION
         self.operation_journal = SqlOperationJournal()
         self._read_thread: QThread | None = None
         self._read_worker: MeterReadWorker | None = None
@@ -288,7 +381,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("HLS Key Control Utility")
         self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
-        self.setMinimumSize(860, 560)
+        self.setMinimumSize(860, 680)
 
         self._settings = QSettings(
             "HlsKeyControl",
@@ -337,6 +430,53 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
 
+        mode_switch = QFrame()
+        mode_switch.setObjectName("modeSwitch")
+
+        mode_layout = QVBoxLayout(mode_switch)
+        mode_layout.setContentsMargins(10, 8, 10, 8)
+        mode_layout.setSpacing(6)
+
+        mode_selector = QFrame()
+        mode_selector.setObjectName("modeSelector")
+
+        mode_buttons_layout = QHBoxLayout(mode_selector)
+        mode_buttons_layout.setContentsMargins(3, 3, 3, 3)
+        mode_buttons_layout.setSpacing(2)
+
+        self.personalization_mode_button = QPushButton(
+            "Персонализация"
+        )
+        self.personalization_mode_button.setObjectName("modeButton")
+        self.personalization_mode_button.setCheckable(True)
+        self.personalization_mode_button.setChecked(True)
+
+        self.service_mode_button = QPushButton("Обслуживание")
+        self.service_mode_button.setObjectName("modeButton")
+        self.service_mode_button.setCheckable(True)
+        self.mode_indicator_label = QLabel(
+            "● Режим персонализации"
+        )
+        self.mode_indicator_label.setObjectName("modeIndicator")
+        mode_buttons_layout.addWidget(
+            self.personalization_mode_button
+        )
+        mode_buttons_layout.addWidget(self.service_mode_button)
+
+        mode_layout.addWidget(mode_selector)
+        mode_layout.addWidget(self.mode_indicator_label)
+
+        self.personalization_mode_button.clicked.connect(
+            lambda: self._set_work_mode(
+                WorkMode.PERSONALIZATION
+            )
+        )
+        self.service_mode_button.clicked.connect(
+            lambda: self._set_work_mode(WorkMode.SERVICE)
+        )
+
+        header_layout.addWidget(mode_switch)
+
         meter_card = QFrame()
         meter_card.setObjectName("card")
 
@@ -349,12 +489,18 @@ class MainWindow(QMainWindow):
 
         self.serial_label = QLabel("Серийный номер: —")
         self.serial_label.setObjectName("serialNumber")
+        self.serial_label.setFixedHeight(34)
+        self.serial_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft
+            | Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.meter_status_label = QLabel(
             "Нажмите «Считать номер» для проверки сценария."
         )
         self.meter_status_label.setObjectName("meterStatus")
         self.meter_status_label.setWordWrap(True)
+        self.meter_status_label.setMinimumHeight(24)
 
         meter_layout.addWidget(card_title)
         meter_layout.addWidget(self.serial_label)
@@ -362,7 +508,7 @@ class MainWindow(QMainWindow):
 
         self.operation_panel = QFrame()
         self.operation_panel.setObjectName("operationPanel")
-        self.operation_panel.setMinimumHeight(62)
+        self.operation_panel.setMinimumHeight(72)
 
         operation_layout = QHBoxLayout(self.operation_panel)
         operation_layout.setContentsMargins(12, 9, 12, 9)
@@ -374,12 +520,12 @@ class MainWindow(QMainWindow):
 
         self.operation_title_label = QLabel()
         self.operation_title_label.setObjectName("operationTitle")
-        self.operation_title_label.setMinimumHeight(18)
+        self.operation_title_label.setMinimumHeight(22)
 
         self.operation_stage_label = QLabel()
         self.operation_stage_label.setObjectName("operationStage")
         self.operation_stage_label.setWordWrap(True)
-        self.operation_stage_label.setMinimumHeight(18)
+        self.operation_stage_label.setMinimumHeight(22)
 
         self.operation_elapsed_label = QLabel("00:00")
         self.operation_elapsed_label.setObjectName("operationElapsed")
@@ -414,7 +560,7 @@ class MainWindow(QMainWindow):
         )
         self.write_button.setEnabled(False)
         self.write_button.clicked.connect(
-            self._start_hls_personalization
+            self._start_hls_write
         )
 
         self.reset_button = QPushButton("Сбросить HLS")
@@ -438,7 +584,7 @@ class MainWindow(QMainWindow):
             "заводской или персональный HLS после сбоя."
         )
         self.recovery_button.clicked.connect(
-            self._start_hls_state_recovery
+            self._start_hls_recovery
         )
 
         self.export_button = QPushButton(
@@ -450,7 +596,7 @@ class MainWindow(QMainWindow):
             "не были включены в Excel-выгрузку."
         )
         self.export_button.clicked.connect(
-            self._open_export_preparation
+            self._open_mode_action
         )
 
         buttons_layout.addWidget(self.read_button)
@@ -544,6 +690,64 @@ class MainWindow(QMainWindow):
         container.setLayout(root_layout)
         self.setCentralWidget(container)
 
+    def _set_work_mode(self, mode: WorkMode) -> None:
+        """Переключает сценарий работы и очищает прошлый результат."""
+        if (
+            self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+            or self._recovery_thread is not None
+        ):
+            return
+
+        self._work_mode = mode
+
+        is_personalization = (
+            mode == WorkMode.PERSONALIZATION
+        )
+
+        self.personalization_mode_button.setChecked(
+            is_personalization
+        )
+        self.service_mode_button.setChecked(
+            not is_personalization
+        )
+
+        self.current_meter = None
+        self.serial_label.setText("Серийный номер: —")
+        self.meter_status_label.setStyleSheet("")
+
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+
+        if is_personalization:
+            self.mode_indicator_label.setText(
+                "● Режим персонализации"
+            )
+            self.meter_status_label.setText(
+                "Нажмите «Считать номер» для проверки сценария."
+            )
+            self.write_button.setText("Записать новый HLS")
+            self.export_button.setText("Подготовить выгрузку")
+            self.export_button.setEnabled(True)
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Готово к персонализации"
+            )
+        else:
+            self.mode_indicator_label.setText(
+                "● Режим обслуживания"
+            )
+            self.meter_status_label.setText(
+                "Считайте номер счётчика для сервисной работы."
+            )
+            self.write_button.setText("Записать сервисный HLS")
+            self.export_button.setText("Прочитать HLS")
+            self.export_button.setEnabled(False)
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Режим обслуживания"
+            )
+
     def _begin_operation(
         self,
         title: str,
@@ -557,7 +761,7 @@ class MainWindow(QMainWindow):
         self.operation_panel.show()
         self._operation_timer.start()
         self._update_operation_indicator()
-
+        self.meter_status_label.setMinimumHeight(24)
         self.meter_status_label.setText(
             f"Выполняется операция: {title}."
         )
@@ -647,6 +851,14 @@ class MainWindow(QMainWindow):
             f"{prefixes[state]} {text}"
         )
         self.meter_status_label.setStyleSheet(styles[state])
+        required_height = (
+            self.meter_status_label.heightForWidth(
+                self.meter_status_label.width()
+            )
+        )
+        self.meter_status_label.setMinimumHeight(
+            max(24, required_height)
+        )
 
         serial_number = (
             self.current_meter.serial_number
@@ -815,6 +1027,116 @@ class MainWindow(QMainWindow):
                 f"{operation.description}"
             )
             self.operations_list.addItem(item)
+
+    def _open_mode_action(self) -> None:
+        """Выполняет действие последней кнопки текущего режима."""
+        if self._work_mode == WorkMode.SERVICE:
+            self._show_service_hls()
+            return
+
+        self._open_export_preparation()
+
+    def _show_service_hls(self) -> None:
+        """Показывает только подтверждённый сервисный HLS."""
+        if self.current_meter is None:
+            return
+
+        try:
+            service_hls = (
+                self.hls_registry.get_active_service_hls_password(
+                    self.current_meter
+                )
+            )
+        except ValueError:
+            dialog = QDialog(self)
+            dialog.setObjectName("confirmationDialog")
+            dialog.setWindowTitle("Сервисный HLS не найден")
+            dialog.setMinimumWidth(500)
+
+            dialog_layout = QVBoxLayout(dialog)
+            dialog_layout.setContentsMargins(24, 22, 24, 22)
+            dialog_layout.setSpacing(14)
+
+            title = QLabel("Текущий HLS нельзя прочитать")
+            title.setObjectName("confirmationTitle")
+
+            description = QLabel(
+                "Счётчик не позволяет прочитать действующий "
+                "HLS-пароль. В реестре нет подтверждённого "
+                "сервисного HLS, созданного этим приложением.\n\n"
+                "Запишите новый сервисный HLS или сбросьте "
+                "счётчик до заводского HLS."
+            )
+            description.setWordWrap(True)
+
+            buttons_layout = QHBoxLayout()
+            buttons_layout.addStretch()
+
+            ok_button = QPushButton("Понятно")
+            ok_button.setObjectName("primaryButton")
+            ok_button.setDefault(True)
+            ok_button.clicked.connect(dialog.accept)
+
+            buttons_layout.addWidget(ok_button)
+
+            dialog_layout.addWidget(title)
+            dialog_layout.addWidget(description)
+            dialog_layout.addLayout(buttons_layout)
+
+            dialog.exec()
+            return
+
+        dialog = QDialog(self)
+        dialog.setObjectName("confirmationDialog")
+        dialog.setWindowTitle("Сервисный HLS")
+        dialog.setMinimumWidth(500)
+
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(24, 22, 24, 22)
+        dialog_layout.setSpacing(14)
+
+        title = QLabel("Подтверждённый сервисный HLS")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            "Этот HLS был создан приложением в режиме "
+            "обслуживания. Он не включается в Excel-выгрузку."
+        )
+        description.setWordWrap(True)
+
+        password_field = QLineEdit(service_hls)
+        password_field.setReadOnly(True)
+        password_field.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.NoContextMenu
+        )
+        password_field.selectAll()
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        copy_button = QPushButton("Скопировать")
+        copy_button.setObjectName("secondaryButton")
+
+        def copy_service_hls() -> None:
+            QApplication.clipboard().setText(service_hls)
+            copy_button.setText("Скопировано")
+
+        copy_button.clicked.connect(copy_service_hls)
+
+        close_button = QPushButton("Закрыть")
+        close_button.setObjectName("primaryButton")
+        close_button.setDefault(True)
+        close_button.clicked.connect(dialog.accept)
+
+        buttons_layout.addWidget(copy_button)
+        buttons_layout.addWidget(close_button)
+
+        dialog_layout.addWidget(title)
+        dialog_layout.addWidget(description)
+        dialog_layout.addWidget(password_field)
+        dialog_layout.addLayout(buttons_layout)
+
+        dialog.exec()
 
     def _open_export_preparation(self) -> None:
         """Открывает просмотр HLS, готовых к новой выгрузке."""
@@ -1028,7 +1350,13 @@ class MainWindow(QMainWindow):
             f"Серийный номер: {meter.serial_number}"
         )
         self._refresh_operations()
-
+        if self._work_mode == WorkMode.SERVICE:
+            self._apply_service_read_result(
+                meter,
+                was_created,
+                elapsed_seconds,
+            )
+            return
         if meter.status in {
             MeterStatus.NEW,
             MeterStatus.RESET,
@@ -1068,6 +1396,21 @@ class MainWindow(QMainWindow):
             return
 
         if meter.status == MeterStatus.PERSONALIZED:
+            if self.hls_registry.has_active_service_hls(meter):
+                self._set_meter_result(
+                    "Сервисный HLS подтверждён. Доступны запись "
+                    "персонализационного HLS или сброс до "
+                    "заводского HLS.",
+                    "success",
+                )
+                self.system_status_label.setText(
+                    "Реестр: SQL Server · Сервисный HLS активен"
+                )
+                self.write_button.setEnabled(True)
+                self.reset_button.setEnabled(True)
+                self.recovery_button.setEnabled(False)
+                return
+
             self._set_meter_result(
                 "Новый HLS подтверждён. Доступен физический "
                 "сброс до заводского HLS.",
@@ -1104,6 +1447,79 @@ class MainWindow(QMainWindow):
         self.reset_button.setEnabled(False)
         self.recovery_button.setEnabled(False)
 
+    def _apply_service_read_result(
+        self,
+        meter: Meter,
+        was_created: bool,
+        elapsed_seconds: float,
+    ) -> None:
+        """Показывает результат чтения в режиме обслуживания."""
+        if meter.status == MeterStatus.OPERATION_UNCONFIRMED:
+            self._set_meter_result(
+                "Есть неподтверждённая операция с HLS. "
+                "Сервисные действия пока заблокированы.",
+                "error",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Требуется проверка HLS"
+            )
+            self.write_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
+            self.recovery_button.setEnabled(True)
+            self.export_button.setEnabled(False)
+            return
+
+        if meter.status == MeterStatus.HLS_STATE_UNKNOWN:
+            self._set_meter_result(
+                "Состояние HLS не подтверждено после сбоя. "
+                "Сервисные действия пока заблокированы.",
+                "error",
+            )
+            self.system_status_label.setText(
+                "Реестр: SQL Server · Требуется проверка HLS"
+            )
+            return
+
+        if was_created:
+            registry_text = "внесён в реестр"
+        else:
+            registry_text = "найден в реестре"
+
+        can_reset_hls = meter.status in {
+            MeterStatus.NEW,
+            MeterStatus.PERSONALIZED,
+        }
+
+        if meter.status == MeterStatus.NEW:
+            action_text = (
+                "Текущий HLS неизвестен. Доступны запись "
+                "сервисного HLS или возврат к заводскому HLS."
+            )
+        elif meter.status == MeterStatus.RESET:
+            action_text = (
+                "Заводской HLS уже подтверждён. Доступна "
+                "запись сервисного HLS."
+            )
+        else:
+            action_text = (
+                "Доступны замена сервисного HLS и сброс "
+                "до заводского HLS."
+            )
+
+        self._set_meter_result(
+            f"Счётчик считан за {elapsed_seconds:.1f} с и "
+            f"{registry_text}. {action_text}",
+            "success",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Счётчик считан в сервисном режиме"
+        )
+
+        self.write_button.setEnabled(True)
+        self.reset_button.setEnabled(can_reset_hls)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(True)
+
     def _handle_read_failure(self, error_text: str) -> None:
         """Показывает безопасное сообщение об ошибке чтения."""
         self._finish_operation()
@@ -1128,7 +1544,190 @@ class MainWindow(QMainWindow):
         self._read_thread = None
         self._read_worker = None
         self.read_button.setEnabled(True)
+
+        if self._work_mode == WorkMode.PERSONALIZATION:
+            self.export_button.setEnabled(True)
+
+    def _start_hls_write(self) -> None:
+        """Запускает запись HLS для выбранного рабочего режима."""
+        if self._work_mode == WorkMode.SERVICE:
+            self._start_service_hls_write()
+            return
+
+        self._start_hls_personalization()
+
+    def _start_service_hls_write(self) -> None:
+        """Запрашивает подтверждение и записывает сервисный HLS."""
+        if (
+            self.current_meter is None
+            or self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+            or self._recovery_thread is not None
+        ):
+            return
+
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
+        )
+
+        if not selected_port:
+            self._set_meter_result(
+                "Выберите COM-порт оптической головки.",
+                "error",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setObjectName("confirmationDialog")
+        dialog.setWindowTitle("Подтверждение сервисной записи HLS")
+        dialog.setMinimumWidth(500)
+
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(24, 22, 24, 22)
+        dialog_layout.setSpacing(14)
+
+        title = QLabel("Записать сервисный HLS?")
+        title.setObjectName("confirmationTitle")
+
+        description = QLabel(
+            "Будет создан и записан новый сервисный HLS-пароль "
+            "в счётчик. Этот HLS не будет включён "
+            "в Excel-выгрузку."
+        )
+        description.setWordWrap(True)
+
+        warning = QLabel(
+            "Прежний HLS перестанет работать. Не отключайте "
+            "оптическую головку и питание до завершения "
+            "проверки нового HLS."
+        )
+        warning.setObjectName("confirmationWarning")
+        warning.setWordWrap(True)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setObjectName("secondaryButton")
+        cancel_button.clicked.connect(dialog.reject)
+
+        confirm_button = QPushButton("Записать сервисный HLS")
+        confirm_button.setObjectName("primaryButton")
+        confirm_button.clicked.connect(dialog.accept)
+
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(confirm_button)
+
+        dialog_layout.addWidget(title)
+        dialog_layout.addWidget(description)
+        dialog_layout.addWidget(warning)
+        dialog_layout.addLayout(buttons_layout)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(False)
+        self.personalization_mode_button.setEnabled(False)
+        self.service_mode_button.setEnabled(False)
+
+        self._begin_operation(
+            "Запись сервисного HLS",
+            "Подготовка защищённого сеанса с ПУ...",
+        )
+        self.meter_status_label.setText(
+            "Подготовка записи сервисного HLS..."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Выполняется сервисная запись HLS"
+        )
+
+        thread = QThread(self)
+        worker = HlsServiceWriteWorker(
+            self.current_meter,
+            selected_port,
+        )
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._show_hls_progress)
+        worker.succeeded.connect(
+            self._apply_service_hls_write_success
+        )
+        worker.failed.connect(
+            self._handle_service_hls_write_failure
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._finish_service_hls_write
+        )
+
+        self._hls_thread = thread
+        self._hls_worker = worker
+        thread.start()
+
+    def _apply_service_hls_write_success(
+        self,
+        serial_number: str,
+        elapsed_seconds: float,
+    ) -> None:
+        """Показывает подтверждённую запись сервисного HLS."""
+        self._finish_operation()
+        self._refresh_operations()
+        self.serial_label.setText(
+            f"Серийный номер: {serial_number}"
+        )
+        self._set_meter_result(
+            f"Сервисный HLS записан и подтверждён за "
+            f"{elapsed_seconds:.1f} с.",
+            "success",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Сервисный HLS активен"
+        )
         self.export_button.setEnabled(True)
+
+    def _handle_service_hls_write_failure(
+        self,
+        error_text: str,
+    ) -> None:
+        """Блокирует повторную сервисную запись при неясном результате."""
+        self._finish_operation()
+        self._refresh_operations()
+        self._set_meter_result(
+            "Запись сервисного HLS не подтверждена. "
+            "Повторная запись заблокирована.",
+            "error",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Состояние HLS неизвестно"
+        )
+
+        QMessageBox.warning(
+            self,
+            "Запись сервисного HLS не подтверждена",
+            error_text,
+        )
+
+    def _finish_service_hls_write(self) -> None:
+        """Возвращает интерфейс после сервисной записи HLS."""
+        self._hls_thread = None
+        self._hls_worker = None
+        self.read_button.setEnabled(True)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(True)
+        self.personalization_mode_button.setEnabled(True)
+        self.service_mode_button.setEnabled(True)
 
     def _start_hls_personalization(self) -> None:
         """Запрашивает подтверждение и запускает запись HLS."""
@@ -1163,10 +1762,22 @@ class MainWindow(QMainWindow):
         title = QLabel("Записать новый HLS?")
         title.setObjectName("confirmationTitle")
 
-        description = QLabel(
-            "Будет создан и записан новый HLS-пароль в счётчик. "
-            "Прежний HLS перестанет работать."
-        )
+        if self.hls_registry.has_active_service_hls(
+            self.current_meter
+        ):
+            description_text = (
+                "Сервисный HLS будет заменён новым "
+                "персонализационным HLS-паролем. После "
+                "подтверждения новый ключ станет доступен "
+                "для Excel-выгрузки."
+            )
+        else:
+            description_text = (
+                "Будет создан и записан новый HLS-пароль "
+                "в счётчик. Прежний HLS перестанет работать."
+            )
+
+        description = QLabel(description_text)
         description.setWordWrap(True)
 
         warning = QLabel(
@@ -1301,6 +1912,151 @@ class MainWindow(QMainWindow):
         self.read_button.setEnabled(True)
         self.meter_port_combo.setEnabled(True)
         self.export_button.setEnabled(True)
+
+    def _start_hls_recovery(self) -> None:
+        """Выбирает безопасную проверку для текущего режима."""
+        if (
+            self._work_mode == WorkMode.SERVICE
+            and self.current_meter is not None
+            and self.hls_registry.has_unconfirmed_service_hls(
+                self.current_meter
+            )
+        ):
+            self._start_service_hls_recovery()
+            return
+
+        self._start_hls_state_recovery()
+
+    def _start_service_hls_recovery(self) -> None:
+        """Проверяет сервисный HLS после неподтверждённой записи."""
+        if (
+            self.current_meter is None
+            or self.current_meter.status
+            != MeterStatus.HLS_STATE_UNKNOWN
+            or self._read_thread is not None
+            or self._hls_thread is not None
+            or self._reset_thread is not None
+            or self._recovery_thread is not None
+        ):
+            return
+
+        selected_port = str(
+            self.meter_port_combo.currentData() or ""
+        )
+
+        if not selected_port:
+            self._set_meter_result(
+                "Выберите COM-порт оптической головки.",
+                "error",
+            )
+            return
+
+        self.read_button.setEnabled(False)
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.meter_port_combo.setEnabled(False)
+        self.personalization_mode_button.setEnabled(False)
+        self.service_mode_button.setEnabled(False)
+
+        self._begin_operation(
+            "Проверка сервисного HLS",
+            "Проверка входа с новым сервисным HLS...",
+        )
+        self.meter_status_label.setText(
+            "Проверка сервисного HLS без записи в счётчик..."
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Проверка сервисного HLS"
+        )
+
+        thread = QThread(self)
+        worker = HlsServiceRecoveryWorker(
+            self.current_meter,
+            selected_port,
+        )
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._show_hls_progress)
+        worker.succeeded.connect(
+            self._apply_service_hls_recovery_success
+        )
+        worker.failed.connect(
+            self._handle_service_hls_recovery_failure
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            self._finish_service_hls_recovery
+        )
+
+        self._recovery_thread = thread
+        self._recovery_worker = worker
+        thread.start()
+
+    def _apply_service_hls_recovery_success(
+        self,
+        serial_number: str,
+        elapsed_seconds: float,
+    ) -> None:
+        """Показывает подтверждённый сервисный HLS."""
+        self._finish_operation()
+        self._refresh_operations()
+        self.serial_label.setText(
+            f"Серийный номер: {serial_number}"
+        )
+        self._set_meter_result(
+            f"Сервисный HLS подтверждён за "
+            f"{elapsed_seconds:.1f} с.",
+            "success",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Сервисный HLS активен"
+        )
+
+        self.write_button.setEnabled(True)
+        self.reset_button.setEnabled(True)
+        self.recovery_button.setEnabled(False)
+        self.export_button.setEnabled(True)
+
+    def _handle_service_hls_recovery_failure(
+        self,
+        error_text: str,
+    ) -> None:
+        """Оставляет сервисный HLS заблокированным при неясном результате."""
+        self._finish_operation()
+        self._refresh_operations()
+        self._set_meter_result(
+            "Не удалось подтвердить сервисный HLS. "
+            "Повторная запись остаётся заблокированной.",
+            "error",
+        )
+        self.system_status_label.setText(
+            "Реестр: SQL Server · Требуется проверка сервисного HLS"
+        )
+
+        self.write_button.setEnabled(False)
+        self.reset_button.setEnabled(False)
+        self.recovery_button.setEnabled(True)
+        self.export_button.setEnabled(False)
+
+        QMessageBox.warning(
+            self,
+            "Сервисный HLS не подтверждён",
+            error_text,
+        )
+
+    def _finish_service_hls_recovery(self) -> None:
+        """Возвращает интерфейс после проверки сервисного HLS."""
+        self._recovery_thread = None
+        self._recovery_worker = None
+        self.read_button.setEnabled(True)
+        self.meter_port_combo.setEnabled(True)
+        self.personalization_mode_button.setEnabled(True)
+        self.service_mode_button.setEnabled(True)
 
     def _start_hls_state_recovery(self) -> None:
         """Проверяет HLS после неподтверждённого сброса."""
@@ -1444,8 +2200,18 @@ class MainWindow(QMainWindow):
         """Запрашивает подтверждение и запускает физический сброс."""
         if (
             self.current_meter is None
-            or self.current_meter.status
-            != MeterStatus.PERSONALIZED
+            or (
+                self._work_mode == WorkMode.PERSONALIZATION
+                and self.current_meter.status
+                != MeterStatus.PERSONALIZED
+            )
+            or (
+                self._work_mode == WorkMode.SERVICE
+                and self.current_meter.status not in {
+                    MeterStatus.NEW,
+                    MeterStatus.PERSONALIZED,
+                }
+            )
             or self._read_thread is not None
             or self._hls_thread is not None
             or self._reset_thread is not None
@@ -1475,10 +2241,28 @@ class MainWindow(QMainWindow):
         title = QLabel("Вернуть заводской HLS?")
         title.setObjectName("confirmationTitle")
 
-        description = QLabel(
-            "Счётчик будет возвращён к заводскому HLS. "
-            "Текущий персональный HLS перестанет работать."
-        )
+        if (
+            self._work_mode == WorkMode.SERVICE
+            and self.current_meter.status == MeterStatus.NEW
+        ):
+            description_text = (
+                "Текущий HLS счётчика неизвестен. Устройство "
+                "будет принудительно возвращено к заводскому "
+                "HLS с обязательной проверкой входа."
+            )
+        elif self._work_mode == WorkMode.SERVICE:
+            description_text = (
+                "Счётчик будет возвращён к заводскому HLS. "
+                "Текущий сервисный HLS перестанет работать."
+            )
+        else:
+            description_text = (
+                "Счётчик будет возвращён к заводскому HLS. "
+                "Текущий персонализационный HLS перестанет "
+                "работать."
+            )
+
+        description = QLabel(description_text)
         description.setWordWrap(True)
 
         warning = QLabel(
@@ -1630,7 +2414,9 @@ class MainWindow(QMainWindow):
         self._reset_worker = None
         self.read_button.setEnabled(True)
         self.meter_port_combo.setEnabled(True)
-        self.export_button.setEnabled(True)
+        self.export_button.setEnabled(
+            self._work_mode == WorkMode.PERSONALIZATION
+        )
 
 
 def apply_application_style(app: QApplication) -> None:
@@ -1685,6 +2471,45 @@ def apply_application_style(app: QApplication) -> None:
             background-color: #E0F7ED;
             border-radius: 8px;
             padding: 8px 12px;
+        }
+
+        QFrame#modeSwitch {
+            background-color: white;
+            border: 1px solid #9DE4C0;
+            border-radius: 10px;
+        }
+
+        QFrame#modeSelector {
+            background-color: #E0F7ED;
+            border: 1px solid #9DE4C0;
+            border-radius: 8px;
+        }
+
+        QPushButton#modeButton {
+            min-height: 30px;
+            padding: 0 11px;
+            color: #53616A;
+            background-color: transparent;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        QPushButton#modeButton:hover {
+            color: #007A5E;
+        }
+
+        QPushButton#modeButton:checked {
+            color: white;
+            background-color: #009975;
+            border: 1px solid #009975;
+        }
+
+        QLabel#modeIndicator {
+            color: #007A5E;
+            font-size: 12px;
+            font-weight: 600;
         }
 
         QFrame#operationPanel {

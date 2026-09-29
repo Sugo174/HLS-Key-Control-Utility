@@ -5,6 +5,7 @@ from uuid import UUID
 from hls_key_control.domain.models import (
     HlsKey,
     HlsKeyStatus,
+    HlsKeyPurpose,
     Meter,
     MeterStatus,
     OperationType,
@@ -20,7 +21,11 @@ class SqlHlsKeyRepository:
     def __init__(self) -> None:
         self._protector = HlsProtector()
 
-    def reserve_new_key(self, meter: Meter) -> tuple[HlsKey, str]:
+    def reserve_new_key(
+        self,
+        meter: Meter,
+        purpose: HlsKeyPurpose = HlsKeyPurpose.PERSONALIZATION,
+    ) -> tuple[HlsKey, str]:
         """Создаёт HLS, шифрует его и сохраняет резерв в одной транзакции."""
         connection = open_connection()
 
@@ -43,16 +48,41 @@ class SqlHlsKeyRepository:
                 raise ValueError("ПУ отсутствует в базе данных.")
 
             database_status = MeterStatus(str(meter_row.status))
+            active_service_key_row = None
 
-            if database_status not in {
-                MeterStatus.NEW,
-                MeterStatus.RESET,
-            }:
+            if (
+                database_status == MeterStatus.PERSONALIZED
+                and meter_row.current_hls_key_id is not None
+            ):
+                active_service_key_row = cursor.execute(
+                    """
+                    SELECT hls_key_id
+                    FROM dbo.HlsKeys WITH (UPDLOCK, SERIALIZABLE)
+                    WHERE
+                        hls_key_id = ?
+                        AND purpose = ?
+                        AND status = ?;
+                    """,
+                    str(meter_row.current_hls_key_id),
+                    HlsKeyPurpose.SERVICE.value,
+                    HlsKeyStatus.ACTIVE.value,
+                ).fetchone()
+
+            can_replace_service_hls = (
+                active_service_key_row is not None
+            )
+
+            if (
+                database_status not in {
+                    MeterStatus.NEW,
+                    MeterStatus.RESET,
+                }
+                and not can_replace_service_hls
+            ):
                 raise ValueError(
                     "Для данного ПУ нельзя создать новый HLS "
                     "в текущем статусе."
                 )
-
             hls_password = generate_hls_password()
             fingerprint = self._protector.create_fingerprint(hls_password)
             encrypted_value = self._protector.encrypt(hls_password)
@@ -63,19 +93,22 @@ class SqlHlsKeyRepository:
                     meter_id,
                     status,
                     fingerprint,
-                    encrypted_value
+                    encrypted_value,
+                    purpose
                 )
                 OUTPUT
                     inserted.hls_key_id,
                     inserted.status,
                     inserted.fingerprint,
+                    inserted.purpose,
                     inserted.created_at
-                VALUES (?, ?, ?, ?);
+                VALUES (?, ?, ?, ?, ?);
                 """,
                 str(meter_row.meter_id),
                 HlsKeyStatus.RESERVED.value,
                 fingerprint,
                 encrypted_value,
+                purpose.value,
             ).fetchone()
 
             cursor.execute(
@@ -105,6 +138,7 @@ class SqlHlsKeyRepository:
                 meter_serial_number=meter.serial_number,
                 status=HlsKeyStatus(str(key_row.status)),
                 fingerprint=str(key_row.fingerprint),
+                purpose=HlsKeyPurpose(str(key_row.purpose)),
                 created_at=key_row.created_at,
             )
 
@@ -112,6 +146,570 @@ class SqlHlsKeyRepository:
             meter.status = MeterStatus.OPERATION_UNCONFIRMED
 
             return key, hls_password
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reserve_service_key(
+        self,
+        meter: Meter,
+    ) -> tuple[HlsKey, str]:
+        """Резервирует сервисный HLS, не затрагивая текущий ключ ПУ."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            meter_row = cursor.execute(
+                """
+                SELECT
+                    meter_id,
+                    status,
+                    current_hls_key_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if meter_row is None:
+                raise ValueError("Счётчик отсутствует в базе данных.")
+
+            database_status = MeterStatus(str(meter_row.status))
+
+            if database_status in {
+                MeterStatus.OPERATION_UNCONFIRMED,
+                MeterStatus.HLS_STATE_UNKNOWN,
+            }:
+                raise ValueError(
+                    "Для счётчика есть незавершённая операция HLS. "
+                    "Сначала проверьте состояние HLS."
+                )
+
+            pending_key = cursor.execute(
+                """
+                SELECT TOP (1) hls_key_id
+                FROM dbo.HlsKeys
+                WHERE
+                    meter_id = ?
+                    AND purpose = ?
+                    AND status IN (?, ?);
+                """,
+                str(meter_row.meter_id),
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.RESERVED.value,
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).fetchone()
+
+            if pending_key is not None:
+                raise ValueError(
+                    "Для счётчика уже есть сервисный HLS, "
+                    "ожидающий завершения операции."
+                )
+
+            hls_password = generate_hls_password()
+            fingerprint = self._protector.create_fingerprint(hls_password)
+            encrypted_value = self._protector.encrypt(hls_password)
+
+            key_row = cursor.execute(
+                """
+                INSERT INTO dbo.HlsKeys (
+                    meter_id,
+                    status,
+                    fingerprint,
+                    encrypted_value,
+                    purpose
+                )
+                OUTPUT
+                    inserted.hls_key_id,
+                    inserted.status,
+                    inserted.fingerprint,
+                    inserted.purpose,
+                    inserted.created_at
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                str(meter_row.meter_id),
+                HlsKeyStatus.RESERVED.value,
+                fingerprint,
+                encrypted_value,
+                HlsKeyPurpose.SERVICE.value,
+            ).fetchone()
+
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_RESERVED,
+                "Сервисный HLS сформирован и зарезервирован.",
+            )
+
+            connection.commit()
+
+            return (
+                HlsKey(
+                    id=UUID(str(key_row.hls_key_id)),
+                    meter_serial_number=meter.serial_number,
+                    status=HlsKeyStatus(str(key_row.status)),
+                    fingerprint=str(key_row.fingerprint),
+                    purpose=HlsKeyPurpose(str(key_row.purpose)),
+                    created_at=key_row.created_at,
+                ),
+                hls_password,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def get_reserved_service_hls_password(
+        self,
+        meter: Meter,
+    ) -> str:
+        """Возвращает сервисный HLS только для первой попытки записи."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT TOP (1) h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.meter_id = m.meter_id
+                WHERE
+                    m.serial_number = ?
+                    AND h.purpose = ?
+                    AND h.status = ?
+                ORDER BY h.created_at DESC;
+                """,
+                meter.serial_number,
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.RESERVED.value,
+            ).fetchone()
+
+            if row is None or row.encrypted_value is None:
+                raise ValueError(
+                    "Нет сервисного HLS, готового к записи."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
+    def has_unconfirmed_service_hls(
+        self,
+        meter: Meter,
+    ) -> bool:
+        """Проверяет, ожидает ли сервисный HLS подтверждения."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT 1
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.meter_id = m.meter_id
+                WHERE
+                    m.serial_number = ?
+                    AND h.purpose = ?
+                    AND h.status = ?;
+                """,
+                meter.serial_number,
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).fetchone()
+
+            return row is not None
+        finally:
+            connection.close()
+
+
+    def get_unconfirmed_service_hls_password(
+        self,
+        meter: Meter,
+    ) -> str:
+        """Возвращает сервисный HLS только для проверки его состояния."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT TOP (1) h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.meter_id = m.meter_id
+                WHERE
+                    m.serial_number = ?
+                    AND h.purpose = ?
+                    AND h.status = ?
+                ORDER BY h.created_at DESC;
+                """,
+                meter.serial_number,
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).fetchone()
+
+            if row is None or row.encrypted_value is None:
+                raise ValueError(
+                    "Нет неподтверждённого сервисного HLS "
+                    "для проверки."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
+    def has_active_service_hls(
+        self,
+        meter: Meter,
+    ) -> bool:
+        """Проверяет, является ли текущий HLS сервисным."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT 1
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE
+                    m.serial_number = ?
+                    AND h.purpose = ?
+                    AND h.status = ?;
+                """,
+                meter.serial_number,
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.ACTIVE.value,
+            ).fetchone()
+
+            return row is not None
+        finally:
+            connection.close()
+
+
+    def get_active_service_hls_password(
+        self,
+        meter: Meter,
+    ) -> str:
+        """Возвращает подтверждённый сервисный HLS из реестра."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            row = cursor.execute(
+                """
+                SELECT h.encrypted_value
+                FROM dbo.Meters AS m
+                INNER JOIN dbo.HlsKeys AS h
+                    ON h.hls_key_id = m.current_hls_key_id
+                WHERE
+                    m.serial_number = ?
+                    AND h.purpose = ?
+                    AND h.status = ?;
+                """,
+                meter.serial_number,
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.ACTIVE.value,
+            ).fetchone()
+
+            if row is None or row.encrypted_value is None:
+                raise ValueError(
+                    "В реестре нет подтверждённого сервисного HLS "
+                    "для этого счётчика."
+                )
+
+            return self._protector.decrypt(
+                bytes(row.encrypted_value)
+            )
+        finally:
+            connection.close()
+
+    def cancel_reserved_service_hls_before_write(
+        self,
+        meter: Meter,
+    ) -> None:
+        """Отменяет сервисный резерв, если запись в счётчик не началась."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            meter_row = cursor.execute(
+                """
+                SELECT meter_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if meter_row is None:
+                raise ValueError("Счётчик отсутствует в базе данных.")
+
+            key_row = cursor.execute(
+                """
+                SELECT TOP (1) hls_key_id
+                FROM dbo.HlsKeys WITH (UPDLOCK, SERIALIZABLE)
+                WHERE
+                    meter_id = ?
+                    AND purpose = ?
+                    AND status = ?
+                ORDER BY created_at DESC;
+                """,
+                str(meter_row.meter_id),
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.RESERVED.value,
+            ).fetchone()
+
+            if key_row is None:
+                raise ValueError(
+                    "Нет сервисного HLS, ожидающего отмены."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.FAILED.value,
+                str(key_row.hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось отменить сервисный резерв HLS."
+                )
+
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_WRITE_REJECTED,
+                "Команда записи сервисного HLS не отправлялась; "
+                "резерв отозван.",
+            )
+
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def mark_service_hls_write_unconfirmed(
+        self,
+        meter: Meter,
+    ) -> None:
+        """Фиксирует сервисную запись HLS с неизвестным результатом."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            meter_row = cursor.execute(
+                """
+                SELECT meter_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if meter_row is None:
+                raise ValueError("Счётчик отсутствует в базе данных.")
+
+            key_row = cursor.execute(
+                """
+                SELECT TOP (1) hls_key_id
+                FROM dbo.HlsKeys WITH (UPDLOCK, SERIALIZABLE)
+                WHERE
+                    meter_id = ?
+                    AND purpose = ?
+                    AND status = ?
+                ORDER BY created_at DESC;
+                """,
+                str(meter_row.meter_id),
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.RESERVED.value,
+            ).fetchone()
+
+            if key_row is None:
+                raise ValueError(
+                    "Нет сервисного HLS для фиксации "
+                    "неподтверждённой записи."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.UNCONFIRMED.value,
+                str(key_row.hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось зафиксировать "
+                    "неподтверждённую сервисную запись HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET status = ?
+                WHERE meter_id = ?;
+                """,
+                MeterStatus.HLS_STATE_UNKNOWN.value,
+                str(meter_row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_WRITE_UNCONFIRMED,
+                "Запись сервисного HLS не подтверждена. "
+                "Требуется проверка состояния HLS.",
+            )
+
+            connection.commit()
+            meter.status = MeterStatus.HLS_STATE_UNKNOWN
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def confirm_service_hls_written(
+        self,
+        meter: Meter,
+    ) -> None:
+        """Подтверждает сервисный HLS после успешной проверки входа."""
+        connection = open_connection()
+
+        try:
+            cursor = connection.cursor()
+
+            meter_row = cursor.execute(
+                """
+                SELECT meter_id
+                FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
+                WHERE serial_number = ?;
+                """,
+                meter.serial_number,
+            ).fetchone()
+
+            if meter_row is None:
+                raise ValueError("Счётчик отсутствует в базе данных.")
+
+            key_row = cursor.execute(
+                """
+                SELECT TOP (1)
+                    hls_key_id,
+                    status
+                FROM dbo.HlsKeys WITH (UPDLOCK, SERIALIZABLE)
+                WHERE
+                    meter_id = ?
+                    AND purpose = ?
+                    AND status IN (?, ?)
+                ORDER BY created_at DESC;
+                """,
+                str(meter_row.meter_id),
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.RESERVED.value,
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).fetchone()
+
+            if key_row is None:
+                raise ValueError(
+                    "Нет сервисного HLS, ожидающего подтверждения."
+                )
+
+            changed_keys = cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET status = ?
+                WHERE
+                    hls_key_id = ?
+                    AND status IN (?, ?);
+                """,
+                HlsKeyStatus.ACTIVE.value,
+                str(key_row.hls_key_id),
+                HlsKeyStatus.RESERVED.value,
+                HlsKeyStatus.UNCONFIRMED.value,
+            ).rowcount
+
+            if changed_keys != 1:
+                raise RuntimeError(
+                    "Не удалось подтвердить сервисный HLS."
+                )
+
+            cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET
+                    status = ?,
+                    retired_at = SYSUTCDATETIME()
+                WHERE
+                    meter_id = ?
+                    AND status = ?
+                    AND hls_key_id <> ?;
+                """,
+                HlsKeyStatus.RETIRED.value,
+                str(meter_row.meter_id),
+                HlsKeyStatus.ACTIVE.value,
+                str(key_row.hls_key_id),
+            )
+
+            cursor.execute(
+                """
+                UPDATE dbo.Meters
+                SET
+                    current_hls_key_id = ?,
+                    status = ?
+                WHERE meter_id = ?;
+                """,
+                str(key_row.hls_key_id),
+                MeterStatus.PERSONALIZED.value,
+                str(meter_row.meter_id),
+            )
+
+            self._record_operation(
+                cursor,
+                str(meter_row.meter_id),
+                OperationType.HLS_ACTIVATED,
+                "Сервисный HLS записан в счётчик и подтверждён входом.",
+            )
+
+            connection.commit()
+
+            meter.current_hls_key_id = UUID(
+                str(key_row.hls_key_id)
+            )
+            meter.status = MeterStatus.PERSONALIZED
         except Exception:
             connection.rollback()
             raise
@@ -257,6 +855,22 @@ class SqlHlsKeyRepository:
                 raise RuntimeError(
                     "Не удалось подтвердить статус HLS."
                 )
+            cursor.execute(
+                """
+                UPDATE dbo.HlsKeys
+                SET
+                    status = ?,
+                    retired_at = SYSUTCDATETIME()
+                WHERE
+                    meter_id = ?
+                    AND hls_key_id <> ?
+                    AND status = ?;
+                """,
+                HlsKeyStatus.RETIRED.value,
+                str(row.meter_id),
+                str(row.current_hls_key_id),
+                HlsKeyStatus.ACTIVE.value,
+            )
 
             cursor.execute(
                 """
@@ -333,15 +947,51 @@ class SqlHlsKeyRepository:
                     "Не удалось отменить резерв HLS."
                 )
 
+            previous_service_key_row = cursor.execute(
+                """
+                SELECT TOP (1) hls_key_id
+                FROM dbo.HlsKeys
+                WHERE
+                    meter_id = ?
+                    AND hls_key_id <> ?
+                    AND purpose = ?
+                    AND status = ?
+                ORDER BY created_at DESC;
+                """,
+                str(row.meter_id),
+                str(row.current_hls_key_id),
+                HlsKeyPurpose.SERVICE.value,
+                HlsKeyStatus.ACTIVE.value,
+            ).fetchone()
+
+            if previous_service_key_row is not None:
+                restored_hls_key_id = str(
+                    previous_service_key_row.hls_key_id
+                )
+                restored_status = MeterStatus.PERSONALIZED.value
+                description = (
+                    "Команда записи персонализационного HLS "
+                    "не отправлялась; сервисный HLS восстановлен "
+                    "в реестре."
+                )
+            else:
+                restored_hls_key_id = None
+                restored_status = MeterStatus.RESET.value
+                description = (
+                    "Команда записи HLS не отправлялась; "
+                    "резерв отозван."
+                )
+
             cursor.execute(
                 """
                 UPDATE dbo.Meters
                 SET
-                    current_hls_key_id = NULL,
+                    current_hls_key_id = ?,
                     status = ?
                 WHERE meter_id = ?;
                 """,
-                MeterStatus.RESET.value,
+                restored_hls_key_id,
+                restored_status,
                 str(row.meter_id),
             )
 
@@ -349,12 +999,19 @@ class SqlHlsKeyRepository:
                 cursor,
                 str(row.meter_id),
                 OperationType.HLS_WRITE_REJECTED,
-                "Команда записи HLS не отправлялась; резерв отозван.",
+                description,
             )
 
             connection.commit()
-            meter.current_hls_key_id = None
-            meter.status = MeterStatus.RESET
+
+            if previous_service_key_row is not None:
+                meter.current_hls_key_id = UUID(
+                    str(previous_service_key_row.hls_key_id)
+                )
+                meter.status = MeterStatus.PERSONALIZED
+            else:
+                meter.current_hls_key_id = None
+                meter.status = MeterStatus.RESET
         except Exception:
             connection.rollback()
             raise
@@ -514,7 +1171,6 @@ class SqlHlsKeyRepository:
                 """
                 SELECT
                     meter_id,
-                    status,
                     current_hls_key_id
                 FROM dbo.Meters WITH (UPDLOCK, SERIALIZABLE)
                 WHERE serial_number = ?;
@@ -522,12 +1178,7 @@ class SqlHlsKeyRepository:
                 meter.serial_number,
             ).fetchone()
 
-            if (
-                row is None
-                or row.current_hls_key_id is None
-                or str(row.status)
-                != MeterStatus.PERSONALIZED.value
-            ):
+            if row is None:
                 raise ValueError(
                     "Для счётчика нельзя зафиксировать "
                     "неподтверждённый сброс HLS."
@@ -543,12 +1194,23 @@ class SqlHlsKeyRepository:
                 str(row.meter_id),
             )
 
+            if row.current_hls_key_id is None:
+                description = (
+                    "Связь при сбросе HLS не подтверждена. "
+                    "Предыдущий HLS в реестре отсутствует; "
+                    "требуется проверка состояния HLS."
+                )
+            else:
+                description = (
+                    "Связь при сбросе HLS не подтверждена. "
+                    "Требуется проверка состояния HLS."
+                )
+
             self._record_operation(
                 cursor,
                 str(row.meter_id),
                 OperationType.HLS_RESET,
-                "Связь при сбросе HLS не подтверждена. "
-                "Требуется проверка состояния HLS.",
+                description,
             )
 
             connection.commit()
@@ -716,27 +1378,26 @@ class SqlHlsKeyRepository:
             ).fetchone()
 
             if meter_row is None:
-                raise ValueError("ПУ отсутствует в базе данных.")
+                raise ValueError("Счётчик отсутствует в базе данных.")
 
-            if meter_row.current_hls_key_id is None:
-                raise ValueError("У данного ПУ нет HLS для отзыва.")
+            if meter_row.current_hls_key_id is not None:
+                changed_rows = cursor.execute(
+                    """
+                    UPDATE dbo.HlsKeys
+                    SET
+                        status = ?,
+                        retired_at = SYSUTCDATETIME()
+                    WHERE hls_key_id = ?;
+                    """,
+                    HlsKeyStatus.RETIRED.value,
+                    str(meter_row.current_hls_key_id),
+                ).rowcount
 
-            changed_rows = cursor.execute(
-                """
-                UPDATE dbo.HlsKeys
-                SET
-                    status = ?,
-                    retired_at = SYSUTCDATETIME()
-                WHERE hls_key_id = ?;
-                """,
-                HlsKeyStatus.RETIRED.value,
-                str(meter_row.current_hls_key_id),
-            ).rowcount
-
-            if changed_rows != 1:
-                raise RuntimeError(
-                    "Не удалось отозвать текущий HLS в базе данных."
-                )
+                if changed_rows != 1:
+                    raise RuntimeError(
+                        "Не удалось отозвать текущий HLS "
+                        "в базе данных."
+                    )
 
             cursor.execute(
                 """
@@ -750,13 +1411,22 @@ class SqlHlsKeyRepository:
                 str(meter_row.meter_id),
             )
 
+            if description is None:
+                if meter_row.current_hls_key_id is None:
+                    description = (
+                        "HLS сброшен до заводского. "
+                        "Предыдущий HLS в реестре отсутствовал."
+                    )
+                else:
+                    description = (
+                        "HLS сброшен, предыдущий ключ отозван."
+                    )
+
             self._record_operation(
                 cursor,
                 str(meter_row.meter_id),
                 OperationType.HLS_RESET,
-                description or (
-                    "HLS сброшен, предыдущий ключ отозван."
-                ),
+                description,
             )
 
             connection.commit()

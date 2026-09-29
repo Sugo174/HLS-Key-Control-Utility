@@ -14,3 +14,12 @@ config.local.*
 #export and log folders
 exports/
 logs/
+
+# Local release artifacts
+.build/
+dist/
+release/
+/release-qt-fix/
+*.spec
+build/
+packaging/

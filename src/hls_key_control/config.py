@@ -6,6 +6,13 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from hls_key_control.runtime_paths import get_application_directory
+
+
+def _load_local_environment() -> None:
+    """Загружает настройки из .env рядом с EXE или проектом."""
+    load_dotenv(get_application_directory() / ".env")
+
 
 @dataclass(frozen=True, slots=True)
 class DatabaseSettings:
@@ -49,7 +56,7 @@ class HlsSecuritySettings:
 
 def load_database_settings() -> DatabaseSettings:
     """Читает настройки из локального файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     required_names = (
         "HLS_DB_ODBC_DRIVER",
@@ -85,7 +92,7 @@ def load_database_settings() -> DatabaseSettings:
 
 def load_hls_security_settings() -> HlsSecuritySettings:
     """Читает локальные секреты защиты HLS из файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     encryption_key = os.getenv("HLS_ENCRYPTION_KEY", "").strip()
     fingerprint_secret_text = os.getenv(
@@ -130,7 +137,7 @@ class MeterConnectionSettings:
 
 def load_meter_connection_settings() -> MeterConnectionSettings:
     """Читает локальные настройки COM-порта из файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     port = os.getenv("HLS_METER_PORT", "").strip()
     baudrate_text = os.getenv("HLS_METER_BAUDRATE", "").strip()
@@ -173,7 +180,7 @@ class MeterConnectionSettings:
 
 def load_meter_connection_settings() -> MeterConnectionSettings:
     """Читает локальные настройки COM-порта из файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     port = os.getenv("HLS_METER_PORT", "").strip()
     baudrate_text = os.getenv("HLS_METER_BAUDRATE", "").strip()
@@ -222,7 +229,7 @@ class DlmsSettings:
 
 def load_dlms_settings() -> DlmsSettings:
     """Читает и проверяет DLMS-настройки из файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     required_names = (
         "HLS_DLMS_CLIENT_ADDRESS",
@@ -324,7 +331,7 @@ class HlsPasswordSettings:
 
 def load_hls_password_settings() -> HlsPasswordSettings:
     """Читает текущий HLS-пароль ПУ из локального файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     password_text = os.getenv(
         "HLS_METER_HLS_PASSWORD",
@@ -343,7 +350,7 @@ def load_hls_password_settings() -> HlsPasswordSettings:
 
 def load_factory_hls_password_settings() -> HlsPasswordSettings:
     """Читает заводской HLS ПУ из локального файла .env."""
-    load_dotenv()
+    _load_local_environment()
 
     password_text = os.getenv(
         "HLS_FACTORY_HLS_PASSWORD",

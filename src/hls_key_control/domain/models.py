@@ -26,6 +26,13 @@ class HlsKeyStatus(StrEnum):
     FAILED = "failed"
 
 
+class HlsKeyPurpose(StrEnum):
+    """Назначение HLS-пароля."""
+
+    PERSONALIZATION = "personalization"
+    SERVICE = "service"
+
+
 class ExportBatchStatus(StrEnum):
     """Состояния экспортной партии."""
 
@@ -68,6 +75,7 @@ class HlsKey:
     meter_serial_number: str
     status: HlsKeyStatus
     fingerprint: str
+    purpose: HlsKeyPurpose = HlsKeyPurpose.PERSONALIZATION
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
