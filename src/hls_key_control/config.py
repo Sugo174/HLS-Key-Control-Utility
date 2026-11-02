@@ -21,6 +21,7 @@ class DatabaseSettings:
     odbc_driver: str
     server: str
     database: str
+    authentication: str
     user: str
     password: str
     encrypt: str
@@ -28,13 +29,24 @@ class DatabaseSettings:
 
     def connection_string(self) -> str:
         """Формирует строку подключения, не выводя её в журнал."""
-        return ";".join(
+        connection_parts = [
+            f"DRIVER={{{self.odbc_driver}}}",
+            f"SERVER={self.server}",
+            f"DATABASE={self.database}",
+        ]
+
+        if self.authentication == "windows":
+            connection_parts.append("Trusted_Connection=yes")
+        else:
+            connection_parts.extend(
+                [
+                    f"UID={self.user}",
+                    f"PWD={self.password}",
+                ]
+            )
+
+        connection_parts.extend(
             [
-                f"DRIVER={{{self.odbc_driver}}}",
-                f"SERVER={self.server}",
-                f"DATABASE={self.database}",
-                f"UID={self.user}",
-                f"PWD={self.password}",
                 f"Encrypt={self.encrypt}",
                 (
                     "TrustServerCertificate="
@@ -43,6 +55,8 @@ class DatabaseSettings:
                 "Connection Timeout=5",
             ]
         )
+
+        return ";".join(connection_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,21 +69,38 @@ class HlsSecuritySettings:
 
 
 def load_database_settings() -> DatabaseSettings:
-    """Читает настройки из локального файла .env."""
+    """Читает настройки подключения из локального файла .env."""
     _load_local_environment()
+
+    authentication = (
+        os.getenv("HLS_DB_AUTHENTICATION", "sql").strip().lower()
+        or "sql"
+    )
+
+    if authentication not in {"sql", "windows"}:
+        raise RuntimeError(
+            "HLS_DB_AUTHENTICATION должен быть равен sql или windows."
+        )
 
     required_names = (
         "HLS_DB_ODBC_DRIVER",
         "HLS_DB_SERVER",
         "HLS_DB_NAME",
-        "HLS_DB_USER",
-        "HLS_DB_PASSWORD",
         "HLS_DB_ENCRYPT",
         "HLS_DB_TRUST_SERVER_CERTIFICATE",
     )
-
     values = {name: os.getenv(name, "").strip() for name in required_names}
     missing_names = [name for name, value in values.items() if not value]
+
+    user = os.getenv("HLS_DB_USER", "").strip()
+    password = os.getenv("HLS_DB_PASSWORD", "").strip()
+
+    if authentication == "sql":
+        if not user:
+            missing_names.append("HLS_DB_USER")
+
+        if not password:
+            missing_names.append("HLS_DB_PASSWORD")
 
     if missing_names:
         missing_text = ", ".join(missing_names)
@@ -81,8 +112,9 @@ def load_database_settings() -> DatabaseSettings:
         odbc_driver=values["HLS_DB_ODBC_DRIVER"],
         server=values["HLS_DB_SERVER"],
         database=values["HLS_DB_NAME"],
-        user=values["HLS_DB_USER"],
-        password=values["HLS_DB_PASSWORD"],
+        authentication=authentication,
+        user=user,
+        password=password,
         encrypt=values["HLS_DB_ENCRYPT"],
         trust_server_certificate=(
             values["HLS_DB_TRUST_SERVER_CERTIFICATE"]
