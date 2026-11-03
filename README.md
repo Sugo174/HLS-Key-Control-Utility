@@ -2,11 +2,29 @@
 
 [Русская версия](README.ru.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
+[![Checks](https://github.com/Sugo174/HLS-Key-Control-Utility/actions/workflows/checks.yml/badge.svg?branch=master)](https://github.com/Sugo174/HLS-Key-Control-Utility/actions/workflows/checks.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Desktop application for controlled HLS password personalization and maintenance of DLMS/COSEM electricity meters.
 
 The project combines secure HLS lifecycle management, optical-head communication, a shared SQL Server registry, auditable operation history, and Excel export for completed personalization batches.
 
 > This repository contains source code only. It does not contain production HLS passwords, encryption keys, database credentials, exports, logs, or meter-specific configuration.
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Technology stack](#technology-stack)
+- [Security model](#security-model)
+- [Run from source](#run-from-source)
+- [Database authentication](#database-authentication)
+- [Windows build](#windows-build)
+- [Project structure](#project-structure)
+- [Project status](#project-status)
+- [Media](#media)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Highlights
 
@@ -19,6 +37,17 @@ The project combines secure HLS lifecycle management, optical-head communication
 - Export of confirmed personalization HLS entries to a branded Excel workbook.
 - Daily local operation logs and portable Windows build support.
 - SQL Server authentication and Windows integrated authentication modes.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Operator[Operator] --> App[HLS Key Control Utility]
+    App -->|DLMS/GMAC via optical head| Meter[Electricity meter]
+    App -->|ODBC| Registry[(SQL Server registry)]
+    App -->|XLSX export| Excel[Export batch]
+    App -->|Daily TXT files| Logs[Local operation logs]
+```
 
 ## Technology stack
 
@@ -101,7 +130,41 @@ CHANGELOG.md               Version history
 
 ## Project status
 
-**v1.0.0** is the first public portfolio release. It represents a functional internal-style utility and should be configured and reviewed before use with production meters or credentials.
+✔ Core HLS personalization workflow implemented
+
+✔ Service HLS workflow and factory reset implemented
+
+✔ DLMS/GMAC optical-head communication implemented
+
+✔ Shared SQL Server registry, audit journal, HLS history, and Excel export implemented
+
+✔ Concurrent work with a shared registry validated in development
+
+✔ Portable Windows build validated
+
+◐ Migration to a new production SQL Server planned
+
+◐ Stored-procedure rollout for critical registry transactions planned
+
+## Media
+
+### Personalization mode
+
+![Personalization workflow](assets/screenshots/main-personalization.png)
+
+### Service mode
+
+![Service workflow](assets/screenshots/main-service.png)
+
+### HLS history
+
+![Empty HLS history search](assets/screenshots/hls-history.png)
+
+![HLS history search results](assets/screenshots/hls-history-results.png)
+
+### Excel export
+
+![Branded HLS export workbook](assets/screenshots/excel-export.png)
 
 ## Contributing
 
