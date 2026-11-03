@@ -106,3 +106,5 @@ python -m hls_key_control.main
 ## Лицензия
 
 MIT License © 2026 Boris Svistunov. Полный текст — в [LICENSE](LICENSE).
+
+Инструкция для получателя Windows-сборки: [Запуск в Windows](docs/RUN_WINDOWS_RU.md).

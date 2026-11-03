@@ -173,3 +173,5 @@ Contributions and issue reports are welcome. Please read [CONTRIBUTING.md](CONTR
 ## License
 
 MIT License © 2026 Boris Svistunov. See [LICENSE](LICENSE).
+
+For distribution and first-launch instructions, see [Running on Windows](docs/RUN_WINDOWS.md).
