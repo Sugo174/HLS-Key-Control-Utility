@@ -98,7 +98,7 @@ from hls_key_control.runtime_paths import get_assets_directory
 
 TEST_SERIAL_NUMBER = "HLS-SQL-TEST-001"
 ASSETS_DIRECTORY = get_assets_directory()
-APP_ICON_PATH = ASSETS_DIRECTORY / "emis-electra-app.png"
+APP_ICON_PATH = ASSETS_DIRECTORY / "hls-key-control-icon.png"
 BRAND_LOGO_PATH = ASSETS_DIRECTORY / "emis-electra-logo.png"
 
 class WorkMode(StrEnum):

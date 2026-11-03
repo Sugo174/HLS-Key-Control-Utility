@@ -18,8 +18,9 @@ Run the following from the repository root:
     --noconfirm `
     --clean `
     --onedir `
-    --console `
+    --noconsole `
     --name "HLS Key Control Utility" `
+    --icon "src\hls_key_control\assets\hls-key-control-icon.ico" `
     --paths src `
     --add-data "src\hls_key_control\assets;assets" `
     --collect-all gurux_dlms `
